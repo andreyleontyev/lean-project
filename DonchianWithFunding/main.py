@@ -3,6 +3,17 @@ from datetime import datetime
 from BinanceFundingRateData import BinanceFundingRateData
 from YahooHourlyCrypto import YahooHourlyCrypto
 
+# --- КЛАСС КОМИССИИ ---
+class PercentageFeeModel(FeeModel):
+    def __init__(self, percent):
+        self.percent = percent
+
+    def GetOrderFee(self, parameters):
+        # Считаем объем сделки: Цена * Количество
+        val = parameters.Security.Price * abs(parameters.Order.Quantity) * self.percent
+        # Возвращаем размер комиссии в валюте котировки (обычно USD)
+        return OrderFee(CashAmount(val, parameters.Security.QuoteCurrency.Symbol))
+
 class DonchianBTCWithFunding(QCAlgorithm):
 
     def Initialize(self):
@@ -10,19 +21,25 @@ class DonchianBTCWithFunding(QCAlgorithm):
         self.SetEndDate(2026, 1, 1)
         self.SetCash(100000)
 
+
+        self.last_funding_rate = 0.0
+        self.last_funding_time = None
+
         # 1. Добавляем ваши кастомные данные
         # LEAN создаст инструмент с дефолтными настройками (LotSize=1, Market=Empty)
         self.symbol = self.AddData(YahooHourlyCrypto, "BTC", Resolution.Hour).Symbol
         
         # 2. Получаем доступ к объекту этого инструмента
         security = self.Securities[self.symbol]
+
+        self.SetHoldings(self.symbol, 0.7) # Использовать 95% средств
         
         # --- НАСТРОЙКА 1: Дробные лоты (как мы обсуждали ранее) ---
         # Создаем свойства: Описание, Валюта, Множитель, Шаг цены, РАЗМЕР ЛОТА, Тикер
         # LotSize = 0.00000001 (позволяет торговать дробным BTC)
-        binance_like_props = SymbolProperties("BTC Yahoo", "USD", 1, 0.01, 0.00000001, "BTC")
+        binance_like_props = SymbolProperties("BTC Yahoo", "USD", 1, 0.01, 0.00001, "BTC")
         security.SymbolProperties = binance_like_props
-        security.FeeModel = BinanceFeeModel()
+        security.FeeModel = PercentageFeeModel(0.001)  # 0.1% комиссия
 
         # ===== FUNDING DATA =====
         self.funding_symbol = self.AddData(BinanceFundingRateData,"BTC_FUNDING",Resolution.Hour).Symbol
@@ -41,7 +58,7 @@ class DonchianBTCWithFunding(QCAlgorithm):
         self.RegisterIndicator(self.symbol, self.dc_entry, Resolution.Hour)
         self.RegisterIndicator(self.symbol, self.dc_exit, Resolution.Hour)
         self.RegisterIndicator(self.symbol, self.atr, Resolution.Hour)
-        self.RegisterIndicator(self.symbol, self.atr_sma, Resolution.Hour)
+        # atr_sma обновляется вручную, не регистрируем через RegisterIndicator
 
         # ===== RISK =====
         self.risk_per_trade = 0.01
@@ -53,9 +70,14 @@ class DonchianBTCWithFunding(QCAlgorithm):
 
     def OnData(self, data: Slice):
 
-        # ===== FUNDING UPDATE =====
         if data.ContainsKey(self.funding_symbol):
-            self.last_funding_rate = data[self.funding_symbol].Value
+            funding = data[self.funding_symbol].Value
+            if funding != 0:
+                self.last_funding_rate = funding
+                self.last_funding_time = self.Time
+
+        if self.last_funding_rate is None:
+            return
 
         if self.IsWarmingUp:
             return
@@ -63,8 +85,11 @@ class DonchianBTCWithFunding(QCAlgorithm):
         if not data.ContainsKey(self.symbol):
             return
 
-        if self.last_funding_rate is None:
-            return  # funding ещё не пришёл
+        # ===== CHECK INDICATORS READINESS =====
+        if not (self.dc_entry.IsReady and self.dc_exit.IsReady and 
+                self.ema200.IsReady and self.ema50.IsReady and 
+                self.atr.IsReady):
+            return
 
         price = data[self.symbol].Close
 
@@ -73,6 +98,8 @@ class DonchianBTCWithFunding(QCAlgorithm):
         if not self.atr_sma.IsReady:
             return
 
+        # Код сравнивает текущую волатильность (atr.Current.Value) со средней исторической волатильностью (atr_sma.Current.Value).
+        # Логика: Если текущая волатильность ниже или равна средней, код делает return (прекращает работу).
         if self.atr.Current.Value <= self.atr_sma.Current.Value:
             return
 
@@ -84,15 +111,15 @@ class DonchianBTCWithFunding(QCAlgorithm):
 
         # ===== LONG ENTRY =====
         if not invested and allow_long:
-            if (
-                price > self.dc_entry.UpperBand.Current.Value and
-                price > self.ema200.Current.Value
-            ):
+            # Проверяем, что UpperBand готов
+            if (self.dc_entry.UpperBand.IsReady and 
+                data[self.symbol].High > self.dc_entry.UpperBand.Previous.Value and
+                price > self.ema200.Current.Value):
                 qty = self.CalculatePositionSize()
-                self.MarketOrder(self.symbol, qty)
-
-                stop_price = price - self.atr_stop_mult * self.atr.Current.Value
-                self.stop_ticket = self.StopMarketOrder(self.symbol, -qty, stop_price)
+                if qty > 0:
+                    self.MarketOrder(self.symbol, qty)
+                    stop_price = price - self.atr_stop_mult * self.atr.Current.Value
+                    self.stop_ticket = self.StopMarketOrder(self.symbol, -qty, stop_price)
 
         # ===== POSITION MANAGEMENT =====
         if invested:
@@ -111,7 +138,8 @@ class DonchianBTCWithFunding(QCAlgorithm):
                 self.UpdateStop(self.ema50.Current.Value)
 
             # Donchian exit
-            if price < self.dc_exit.LowerBand.Current.Value:
+            if (self.dc_exit.LowerBand.IsReady and 
+                price < self.dc_exit.LowerBand.Previous.Value):
                 self.Liquidate(self.symbol)
                 self.stop_ticket = None
 
