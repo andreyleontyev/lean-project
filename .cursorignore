@@ -1,0 +1,43 @@
+# Add directories or file patterns to ignore during indexing (e.g. foo/ or *.csv)
+# Игнорировать тяжелые зависимости (обычно Cursor и так их игнорирует, но для надежности)
+node_modules/
+vendor/
+
+
+MyOfflineStrategy/__pycache__
+MyOfflineStrategy/.idea
+MyOfflineStrategy/.vscode
+MyOfflineStrategy/backtests
+report.html
+**.zip 
+*.zip 
+#ignore all csv files - custom data
+**.csv 
+
+
+# Секреты и ключи (ОБЯЗАТЕЛЬНО)
+.env
+.env.local
+secrets.json
+
+# Лок-файлы (они занимают много токенов и редко полезны для логики кода)
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+Cargo.lock
+
+# Сгенерированные файлы и папки сборки
+dist/
+build/
+out/
+.next/
+
+# Большие статические файлы (картинки, видео, шрифты)
+*.png
+*.jpg
+*.mp4
+public/assets/
+
+# Логи
+*.log
+npm-debug.log
