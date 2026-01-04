@@ -34,7 +34,6 @@ class YahooHourlyCrypto(PythonData):
             data["Close"] = float(items[4])
             data.Value = float(items[4])
 
-
             # --- ХАК ДЛЯ ОБЪЕМА ---
             # Если объема нет или он 0, ставим искусственный объем.
             # Без этого ордера могут не исполняться!
