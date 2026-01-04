@@ -9,10 +9,9 @@ MyOfflineStrategy/.idea
 MyOfflineStrategy/.vscode
 MyOfflineStrategy/backtests
 report.html
-**.zip 
-*.zip 
+**/*.zip 
 #ignore all csv files - custom data
-**.csv 
+**/*.csv 
 
 
 # Секреты и ключи (ОБЯЗАТЕЛЬНО)
