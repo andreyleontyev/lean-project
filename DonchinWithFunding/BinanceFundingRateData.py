@@ -1,6 +1,5 @@
 from AlgorithmImports import *
 from datetime import datetime
-import os
 
 
 class BinanceFundingRateData(PythonData):
@@ -22,7 +21,7 @@ class BinanceFundingRateData(PythonData):
             SubscriptionDataSource - источник данных
         """
         # Путь к файлу с данными
-        file_path = os.path.join(Globals.DataFolder, "custom","lean_funding_rates", "binance_funding_rate_BTC.csv")
+        file_path = "data/custom/lean_funding_rates/binance_funding_rate_BTC.csv"
         
         return SubscriptionDataSource(
             file_path,

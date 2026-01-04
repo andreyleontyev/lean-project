@@ -1,7 +1,6 @@
 from AlgorithmImports import *
 from datetime import datetime
 from BinanceFundingRateData import BinanceFundingRateData
-from YahooHourlyCrypto import YahooHourlyCrypto
 
 class DonchianBTCWithFunding(QCAlgorithm):
 
@@ -10,26 +9,8 @@ class DonchianBTCWithFunding(QCAlgorithm):
         self.SetEndDate(2025, 1, 1)
         self.SetCash(100000)
 
-        # 1. Добавляем ваши кастомные данные
-        # LEAN создаст инструмент с дефолтными настройками (LotSize=1, Market=Empty)
-        self.symbol = self.AddData(YahooHourlyCrypto, "BTC", Resolution.Hour).Symbol
-        
-        # 2. Получаем доступ к объекту этого инструмента
-        security = self.Securities[self.symbol]
-        
-        # --- НАСТРОЙКА 1: Дробные лоты (как мы обсуждали ранее) ---
-        # Создаем свойства: Описание, Валюта, Множитель, Шаг цены, РАЗМЕР ЛОТА, Тикер
-        # LotSize = 0.00000001 (позволяет торговать дробным BTC)
-        binance_like_props = SymbolProperties("BTC Yahoo", "USD", 1, 0.01, 0.00000001, "BTC")
-        security.SymbolProperties = binance_like_props
-        
-        # --- НАСТРОЙКА 2: Комиссии Binance ---
-        # По умолчанию AddData ставит $0 комиссий или Equity-комиссии.
-        # Ставим модель комиссий Binance
-        security.FeeModel = BinanceFeeModel()
-        
-        # Теперь LEAN будет думать, что это просто кастомные данные, 
-        # но торговать ими позволит дробно и с комиссиями как на Binance.
+        # ===== BTC =====
+        self.symbol = self.AddCrypto("BTCUSDT", Resolution.Hour, Market.Binance).Symbol
 
         # ===== FUNDING DATA =====
         self.funding_symbol = self.AddData(
