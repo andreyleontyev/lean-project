@@ -2,7 +2,7 @@ from AlgorithmImports import *
 from datetime import datetime
 from BinanceFundingRateData import BinanceFundingRateData
 from BinanceHourlyBTC import BinanceHourlyBTC
-from YahooHourlyCrypto import YahooHourlyCrypto
+from collections import deque
 
 # --- КЛАСС КОМИССИИ ---
 class PercentageFeeModel(FeeModel):
@@ -28,6 +28,11 @@ class DonchianBTCWithFunding(QCAlgorithm):
         self.last_funding_rate = 0.0
         self.last_funding_time = None
 
+        self.funding_window = deque(maxlen=168)  # ~7 дней
+        self.min_funding_samples = 30
+
+        self.trade_logs = []
+
         # 1. Добавляем ваши кастомные данные
         # LEAN создаст инструмент с дефолтными настройками (LotSize=1, Market=Empty)
         self.symbol = self.AddData(BinanceHourlyBTC, "BTC", Resolution.Hour).Symbol
@@ -46,6 +51,14 @@ class DonchianBTCWithFunding(QCAlgorithm):
         self.funding_symbol = self.AddData(BinanceFundingRateData,"BTC_FUNDING",Resolution.Hour).Symbol
         self.last_funding_rate = None
 
+        self.funding_buckets = [
+            (-999, -1.5),
+            (-1.5, -0.5),
+            (-0.5, 0.5),
+            (0.5, 1.5),
+            (1.5, 999)
+        ]
+
         # ===== INDICATORS =====
         self.dc_entry = DonchianChannel(20)
         self.dc_exit  = DonchianChannel(10)
@@ -61,8 +74,9 @@ class DonchianBTCWithFunding(QCAlgorithm):
         self.RegisterIndicator(self.symbol, self.atr, Resolution.Hour)
 
         # ===== RISK =====
-        self.risk_per_trade = 0.01
-        self.atr_stop_mult = 2.5
+        self.base_risk_per_trade = 0.01
+        self.max_risk_per_trade = 0.02
+        self.min_risk_per_trade = 0.003
 
         self.stop_ticket = None
 
@@ -88,12 +102,12 @@ class DonchianBTCWithFunding(QCAlgorithm):
         self._manage_position(price)
 
     def _update_funding_rate(self, data: Slice):
-        """Обновляет funding rate из данных"""
         if data.ContainsKey(self.funding_symbol):
             funding = data[self.funding_symbol].Value
             if funding != 0:
                 self.last_funding_rate = funding
                 self.last_funding_time = self.Time
+                self.funding_window.append(funding)
 
     def _should_process_data(self, data: Slice) -> bool:
         """Проверяет все условия для продолжения обработки данных"""
@@ -124,24 +138,44 @@ class DonchianBTCWithFunding(QCAlgorithm):
         return self.atr.Current.Value > self.atr_sma.Current.Value
 
     def _try_long_entry(self, price: float, data: Slice):
-        """Пытается открыть длинную позицию при выполнении условий"""
-        allow_long = self.last_funding_rate <= 0.0001
-        
-        if not allow_long:
+        z = self.FundingZScore()
+
+        breakout = (
+            self.dc_entry.UpperBand.IsReady and
+            data[self.symbol].High > self.dc_entry.UpperBand.Previous.Value
+        )
+
+        trend_ok = price > self.ema200.Current.Value
+
+        # Если рынок перегрет (crowding) — требуем усиленный сетап
+        if z > 1.0:
+            volatility_ok = self.atr.Current.Value > 1.2 * self.atr_sma.Current.Value
+        else:
+            volatility_ok = True
+
+        if not (breakout and trend_ok and volatility_ok):
             return
-        
-        if not (self.dc_entry.UpperBand.IsReady and 
-                data[self.symbol].High > self.dc_entry.UpperBand.Previous.Value and
-                price > self.ema200.Current.Value):
-            return
-        
+
         qty = self.CalculatePositionSize()
         if qty <= 0:
             return
-        
+
+        #======= LOGGING =======
+        z = self.FundingZScore()
+
+        self.current_trade = {
+            "entry_time": self.Time,
+            "entry_price": price,
+            "funding": self.last_funding_rate,
+            "funding_z": z,
+            "bucket": self.FundingBucket(z)
+        }
+
+        #======= END LOGGING =======
+
         self.MarketOrder(self.symbol, qty)
-        
-        stop_price = price - self.atr_stop_mult * self.atr.Current.Value
+
+        stop_price = price - self.DynamicATRStopMultiplier() * self.atr.Current.Value
         stop_price = round(stop_price, DonchianBTCWithFunding.BTC_PRICE_ROUND)
         self.stop_ticket = self.StopMarketOrder(self.symbol, -qty, stop_price)
 
@@ -152,7 +186,7 @@ class DonchianBTCWithFunding(QCAlgorithm):
         atr = self.atr.Current.Value
         
         # Вычисляем текущий R (отношение прибыли к риску)
-        r = (price - entry_price) / (self.atr_stop_mult * atr)
+        r = (price - entry_price) / (self.DynamicATRStopMultiplier() * atr)
         
         # 1. Donchian hard exit
         if self._check_donchian_exit(price):
@@ -175,6 +209,25 @@ class DonchianBTCWithFunding(QCAlgorithm):
         
         if self.stop_ticket:
             self.stop_ticket.Cancel()
+
+        #======= LOGGING =======
+        if hasattr(self, "current_trade") and self.current_trade:
+            trade = self.current_trade
+
+            trade["exit_time"] = self.Time
+            trade["exit_price"] = price
+
+            pnl = (price - trade["entry_price"])
+            trade["pnl"] = pnl
+            trade["holding_hours"] = (trade["exit_time"] - trade["entry_time"]).total_seconds() / 3600
+
+            # R-multiple
+            risk = self.atr.Current.Value * self.atr_stop_mult
+            trade["R"] = pnl / risk if risk > 0 else 0
+
+            self.trade_logs.append(trade)
+            self.current_trade = None
+        #======= END LOGGING =======
         
         self.Liquidate(self.symbol)
         self.stop_ticket = None
@@ -190,6 +243,57 @@ class DonchianBTCWithFunding(QCAlgorithm):
 
     def CalculatePositionSize(self):
         atr = self.atr.Current.Value
-        risk = self.Portfolio.TotalPortfolioValue * self.risk_per_trade
-        qty = risk / (atr * self.atr_stop_mult)
+
+        base_risk = self.Portfolio.TotalPortfolioValue * self.base_risk_per_trade
+        adjusted_risk = base_risk * self.FundingRiskMultiplier()
+
+        adjusted_risk = max(
+            self.min_risk_per_trade * self.Portfolio.TotalPortfolioValue,
+            min(adjusted_risk, self.max_risk_per_trade * self.Portfolio.TotalPortfolioValue)
+        )
+
+        qty = adjusted_risk / (atr * self.DynamicATRStopMultiplier())
         return round(qty, 4)
+
+
+    def FundingZScore(self):
+        if len(self.funding_window) < self.min_funding_samples:
+            return 0.0
+
+        mean = sum(self.funding_window) / len(self.funding_window)
+        var = sum((x - mean) ** 2 for x in self.funding_window) / len(self.funding_window)
+        std = var ** 0.5 if var > 1e-8 else 1e-8
+
+        return (self.last_funding_rate - mean) / std
+
+    def FundingRiskMultiplier(self):
+        z = self.FundingZScore()
+
+        if z < -1.0:
+            return 1.5   # рынок платит за лонг
+        elif z > 1.0:
+            return 0.5   # crowding, режем риск
+        return 1.0
+
+    def DynamicATRStopMultiplier(self):
+        z = self.FundingZScore()
+        if z > 1.0:
+            return 2.0   # tighter
+        if z < -1.0:
+            return 3.0   # даём тренду дышать
+        return 2.5
+
+    def OnEndOfAlgorithm(self):
+        for t in self.trade_logs:
+            self.Debug(
+                f"TRADE | bucket={t['bucket']} | "
+                f"funding_z={round(t['funding_z'],2)} | "
+                f"R={round(t['R'],2)} | "
+                f"hours={round(t['holding_hours'],1)}"
+            )
+
+    def FundingBucket(self, z):
+        for low, high in self.funding_buckets:
+            if low <= z < high:
+                return f"{low}:{high}"
+        return "unknown"
