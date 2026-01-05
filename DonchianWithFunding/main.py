@@ -16,11 +16,13 @@ class PercentageFeeModel(FeeModel):
 
 class DonchianBTCWithFunding(QCAlgorithm):
 
+    BTC_TICK_SIZE = 0.01
+    BTC_PRICE_ROUND = 2
+
     def Initialize(self):
         self.SetStartDate(2024, 1, 1)
         self.SetEndDate(2026, 1, 1)
         self.SetCash(100000)
-
 
         self.last_funding_rate = 0.0
         self.last_funding_time = None
@@ -31,12 +33,10 @@ class DonchianBTCWithFunding(QCAlgorithm):
         
         # 2. Получаем доступ к объекту этого инструмента
         security = self.Securities[self.symbol]
-
-        self.SetHoldings(self.symbol, 0.7) # Использовать 95% средств
         
         # --- НАСТРОЙКА 1: Дробные лоты (как мы обсуждали ранее) ---
         # Создаем свойства: Описание, Валюта, Множитель, Шаг цены, РАЗМЕР ЛОТА, Тикер
-        # LotSize = 0.00000001 (позволяет торговать дробным BTC)
+        # LotSize = 0.00001 (позволяет торговать дробным BTC)
         binance_like_props = SymbolProperties("BTC Yahoo", "USD", 1, 0.01, 0.00001, "BTC")
         security.SymbolProperties = binance_like_props
         security.FeeModel = PercentageFeeModel(0.001)  # 0.1% комиссия
@@ -119,36 +119,45 @@ class DonchianBTCWithFunding(QCAlgorithm):
                 if qty > 0:
                     self.MarketOrder(self.symbol, qty)
                     stop_price = price - self.atr_stop_mult * self.atr.Current.Value
+                    stop_price = round(stop_price, DonchianBTCWithFunding.BTC_PRICE_ROUND)
                     self.stop_ticket = self.StopMarketOrder(self.symbol, -qty, stop_price)
 
-        # ===== POSITION MANAGEMENT =====
-        if invested:
-            holding = self.Portfolio[self.symbol]
-            entry_price = holding.AveragePrice
-            atr = self.atr.Current.Value
+        # return is not need to place Stop
+        if not invested:
+            return
 
-            r = (price - entry_price) / (self.atr_stop_mult * atr)
+        holding = self.Portfolio[self.symbol]
+        entry_price = holding.AveragePrice
+        atr = self.atr.Current.Value
 
-            # Breakeven
-            if r > 1.0:
-                self.UpdateStop(entry_price)
+        r = (price - entry_price) / (self.atr_stop_mult * atr)
 
-            # Trail by EMA50
-            if r > 2.0:
-                self.UpdateStop(self.ema50.Current.Value)
+        # 1. Donchian hard exit
+        if self.dc_exit.IsReady and price < self.dc_exit.LowerBand.Current.Value:
+            if self.stop_ticket:
+                self.stop_ticket.Cancel()
+            self.Liquidate(self.symbol)
+            self.stop_ticket = None
+            return
+        
+        # 2. Breakeven
+        if r > 1.0:
+            self.UpdateStop(entry_price)
 
-            # Donchian exit
-            if (self.dc_exit.LowerBand.IsReady and 
-                price < self.dc_exit.LowerBand.Previous.Value):
-                self.Liquidate(self.symbol)
-                self.stop_ticket = None
+        # 3. EMA trailing (only improve)
+        if r > 2.0 and self.ema50.IsReady:
+            ema = self.ema50.Current.Value
+            new_stop = max(entry_price, ema)
+            self.UpdateStop(new_stop)    
+
+        return
 
     def UpdateStop(self, new_price):
         if self.stop_ticket is None:
             return
 
         update = UpdateOrderFields()
-        update.StopPrice = round(new_price, 2)
+        update.StopPrice = round(new_price, DonchianBTCWithFunding.BTC_PRICE_ROUND)
         self.stop_ticket.Update(update)
 
     def CalculatePositionSize(self):
