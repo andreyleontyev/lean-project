@@ -1,6 +1,7 @@
 from AlgorithmImports import *
 from datetime import datetime
 from BinanceFundingRateData import BinanceFundingRateData
+from BinanceHourlyBTC import BinanceHourlyBTC
 from YahooHourlyCrypto import YahooHourlyCrypto
 
 # --- КЛАСС КОМИССИИ ---
@@ -29,7 +30,7 @@ class DonchianBTCWithFunding(QCAlgorithm):
 
         # 1. Добавляем ваши кастомные данные
         # LEAN создаст инструмент с дефолтными настройками (LotSize=1, Market=Empty)
-        self.symbol = self.AddData(YahooHourlyCrypto, "BTC", Resolution.Hour).Symbol
+        self.symbol = self.AddData(BinanceHourlyBTC, "BTC", Resolution.Hour).Symbol
         
         # 2. Получаем доступ к объекту этого инструмента
         security = self.Securities[self.symbol]
@@ -37,7 +38,7 @@ class DonchianBTCWithFunding(QCAlgorithm):
         # --- НАСТРОЙКА 1: Дробные лоты (как мы обсуждали ранее) ---
         # Создаем свойства: Описание, Валюта, Множитель, Шаг цены, РАЗМЕР ЛОТА, Тикер
         # LotSize = 0.00001 (позволяет торговать дробным BTC)
-        binance_like_props = SymbolProperties("BTC Yahoo", "USD", 1, 0.01, 0.00001, "BTC")
+        binance_like_props = SymbolProperties("BTC Binance", "USD", 1, 0.01, 0.00001, "BTC")
         security.SymbolProperties = binance_like_props
         security.FeeModel = PercentageFeeModel(0.001)  # 0.1% комиссия
 
@@ -58,7 +59,6 @@ class DonchianBTCWithFunding(QCAlgorithm):
         self.RegisterIndicator(self.symbol, self.dc_entry, Resolution.Hour)
         self.RegisterIndicator(self.symbol, self.dc_exit, Resolution.Hour)
         self.RegisterIndicator(self.symbol, self.atr, Resolution.Hour)
-        # atr_sma обновляется вручную, не регистрируем через RegisterIndicator
 
         # ===== RISK =====
         self.risk_per_trade = 0.01
@@ -69,88 +69,116 @@ class DonchianBTCWithFunding(QCAlgorithm):
         self.SetWarmUp(300)
 
     def OnData(self, data: Slice):
+        self._update_funding_rate(data)
+        
+        if not self._should_process_data(data):
+            return
 
+        price = data[self.symbol].Close
+        
+        if not self._check_volatility_filter():
+            return
+
+        invested = self.Portfolio[self.symbol].Invested
+        
+        if not invested:
+            self._try_long_entry(price, data)
+            return
+
+        self._manage_position(price)
+
+    def _update_funding_rate(self, data: Slice):
+        """Обновляет funding rate из данных"""
         if data.ContainsKey(self.funding_symbol):
             funding = data[self.funding_symbol].Value
             if funding != 0:
                 self.last_funding_rate = funding
                 self.last_funding_time = self.Time
 
+    def _should_process_data(self, data: Slice) -> bool:
+        """Проверяет все условия для продолжения обработки данных"""
         if self.last_funding_rate is None:
-            return
-
+            return False
+        
         if self.IsWarmingUp:
-            return
-
+            return False
+        
         if not data.ContainsKey(self.symbol):
-            return
-
-        # ===== CHECK INDICATORS READINESS =====
+            return False
+        
         if not (self.dc_entry.IsReady and self.dc_exit.IsReady and 
                 self.ema200.IsReady and self.ema50.IsReady and 
                 self.atr.IsReady):
-            return
+            return False
+        
+        return True
 
-        price = data[self.symbol].Close
-
-        # ===== VOLATILITY FILTER =====
+    def _check_volatility_filter(self) -> bool:
+        """Проверяет фильтр волатильности: торгуем только при высокой волатильности"""
         self.atr_sma.Update(self.Time, self.atr.Current.Value)
+        
         if not self.atr_sma.IsReady:
+            return False
+        
+        # Торгуем только если текущая волатильность выше средней
+        return self.atr.Current.Value > self.atr_sma.Current.Value
+
+    def _try_long_entry(self, price: float, data: Slice):
+        """Пытается открыть длинную позицию при выполнении условий"""
+        allow_long = self.last_funding_rate <= 0.0001
+        
+        if not allow_long:
             return
-
-        # Код сравнивает текущую волатильность (atr.Current.Value) со средней исторической волатильностью (atr_sma.Current.Value).
-        # Логика: Если текущая волатильность ниже или равна средней, код делает return (прекращает работу).
-        if self.atr.Current.Value <= self.atr_sma.Current.Value:
-            return
-
-        invested = self.Portfolio[self.symbol].Invested
-
-        # ===== FUNDING FILTER =====
-        allow_long  = self.last_funding_rate <= 0.0001
-        allow_short = self.last_funding_rate >= -0.0001
-
-        # ===== LONG ENTRY =====
-        if not invested and allow_long:
-            # Проверяем, что UpperBand готов
-            if (self.dc_entry.UpperBand.IsReady and 
+        
+        if not (self.dc_entry.UpperBand.IsReady and 
                 data[self.symbol].High > self.dc_entry.UpperBand.Previous.Value and
                 price > self.ema200.Current.Value):
-                qty = self.CalculatePositionSize()
-                if qty > 0:
-                    self.MarketOrder(self.symbol, qty)
-                    stop_price = price - self.atr_stop_mult * self.atr.Current.Value
-                    stop_price = round(stop_price, DonchianBTCWithFunding.BTC_PRICE_ROUND)
-                    self.stop_ticket = self.StopMarketOrder(self.symbol, -qty, stop_price)
-
-        # return is not need to place Stop
-        if not invested:
             return
+        
+        qty = self.CalculatePositionSize()
+        if qty <= 0:
+            return
+        
+        self.MarketOrder(self.symbol, qty)
+        
+        stop_price = price - self.atr_stop_mult * self.atr.Current.Value
+        stop_price = round(stop_price, DonchianBTCWithFunding.BTC_PRICE_ROUND)
+        self.stop_ticket = self.StopMarketOrder(self.symbol, -qty, stop_price)
 
+    def _manage_position(self, price: float):
+        """Управляет открытой позицией: выходы и обновление стоп-лосса"""
         holding = self.Portfolio[self.symbol]
         entry_price = holding.AveragePrice
         atr = self.atr.Current.Value
-
+        
+        # Вычисляем текущий R (отношение прибыли к риску)
         r = (price - entry_price) / (self.atr_stop_mult * atr)
-
+        
         # 1. Donchian hard exit
-        if self.dc_exit.IsReady and price < self.dc_exit.LowerBand.Current.Value:
-            if self.stop_ticket:
-                self.stop_ticket.Cancel()
-            self.Liquidate(self.symbol)
-            self.stop_ticket = None
+        if self._check_donchian_exit(price):
             return
         
-        # 2. Breakeven
+        # 2. Breakeven stop
         if r > 1.0:
             self.UpdateStop(entry_price)
-
-        # 3. EMA trailing (only improve)
+        
+        # 3. EMA trailing stop (только улучшаем)
         if r > 2.0 and self.ema50.IsReady:
             ema = self.ema50.Current.Value
             new_stop = max(entry_price, ema)
-            self.UpdateStop(new_stop)    
+            self.UpdateStop(new_stop)
 
-        return
+    def _check_donchian_exit(self, price: float) -> bool:
+        """Проверяет условие выхода по Donchian и выполняет его"""
+        if not (self.dc_exit.IsReady and price < self.dc_exit.LowerBand.Current.Value):
+            return False
+        
+        if self.stop_ticket:
+            self.stop_ticket.Cancel()
+        
+        self.Liquidate(self.symbol)
+        self.stop_ticket = None
+        return True
 
     def UpdateStop(self, new_price):
         if self.stop_ticket is None:
