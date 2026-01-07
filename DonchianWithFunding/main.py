@@ -210,28 +210,15 @@ class DonchianBTCWithFunding(QCAlgorithm):
         if self.stop_ticket:
             self.stop_ticket.Cancel()
 
-        #======= LOGGING =======
-        if hasattr(self, "current_trade") and self.current_trade:
-            trade = self.current_trade
+    def _check_donchian_exit(self, price):
+        if self.dc_exit.IsReady and price < self.dc_exit.LowerBand.Current.Value:
+            if self.stop_ticket:
+                self.stop_ticket.Cancel()
+            self.Liquidate(self.symbol)
+            self.stop_ticket = None
+            return True
+        return False
 
-            trade["exit_time"] = self.Time
-            trade["exit_price"] = price
-
-            pnl = (price - trade["entry_price"])
-            trade["pnl"] = pnl
-            trade["holding_hours"] = (trade["exit_time"] - trade["entry_time"]).total_seconds() / 3600
-
-            # R-multiple
-            risk = self.atr.Current.Value * self.atr_stop_mult
-            trade["R"] = pnl / risk if risk > 0 else 0
-
-            self.trade_logs.append(trade)
-            self.current_trade = None
-        #======= END LOGGING =======
-        
-        self.Liquidate(self.symbol)
-        self.stop_ticket = None
-        return True
 
     def UpdateStop(self, new_price):
         if self.stop_ticket is None:
@@ -297,3 +284,31 @@ class DonchianBTCWithFunding(QCAlgorithm):
             if low <= z < high:
                 return f"{low}:{high}"
         return "unknown"
+
+    def OnOrderEvent(self, orderEvent):
+        if orderEvent.Status != OrderStatus.Filled:
+            return
+
+        # Нас интересует закрывающий ордер
+        if not self.Portfolio[self.symbol].Invested:
+            if not hasattr(self, "current_trade") or self.current_trade is None:
+                return
+
+            trade = self.current_trade
+            exit_price = orderEvent.FillPrice
+
+            trade["exit_time"] = self.Time
+            trade["exit_price"] = exit_price
+
+            pnl = exit_price - trade["entry_price"]
+            trade["pnl"] = pnl
+
+            risk = self.atr.Current.Value * self.DynamicATRStopMultiplier()
+            trade["R"] = pnl / risk if risk > 0 else 0
+
+            trade["holding_hours"] = (
+                trade["exit_time"] - trade["entry_time"]
+            ).total_seconds() / 3600
+
+            self.trade_logs.append(trade)
+            self.current_trade = None
