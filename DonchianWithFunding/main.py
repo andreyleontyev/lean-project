@@ -55,11 +55,11 @@ class DonchianBTCWithFunding(QCAlgorithm):
         self.last_funding_rate = None
 
         self.funding_buckets = [
-            (-999, -1.5),
-            (-1.5, -0.5),
-            (-0.5, 0.5),
-            (0.5, 1.5),
-            (1.5, 999)
+            (-5.0, -2.0),    # экстремально дешёвый лонг
+            (-2.0, -1.0),    # выгодный лонг
+            (-1.0, 1.0),     # нейтраль
+            (1.0, 2.0),      # crowding
+            (2.0, 5.0)       # перегрев
         ]
 
         # ===== INDICATORS =====
@@ -239,14 +239,22 @@ class DonchianBTCWithFunding(QCAlgorithm):
 
 
     def FundingZScore(self):
+
         if len(self.funding_window) < self.min_funding_samples:
             return 0.0
 
         mean = sum(self.funding_window) / len(self.funding_window)
         var = sum((x - mean) ** 2 for x in self.funding_window) / len(self.funding_window)
-        std = var ** 0.5 if var > 1e-8 else 1e-8
 
-        return (self.last_funding_rate - mean) / std
+        std = var ** 0.5
+
+        if std < 1e-6:
+            return 0.0   # funding стабилен → нет сигнала
+
+        z = (self.last_funding_rate - mean) / std
+
+        # 🔒 защита от числовых выбросов
+        return max(-5.0, min(5.0, z))
 
     def FundingRiskMultiplier(self):
         z = self.FundingZScore()
