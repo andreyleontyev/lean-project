@@ -49,6 +49,7 @@ class DonchianBTCWithFunding(QCAlgorithm):
         binance_like_props = SymbolProperties("BTC Binance", "USD", 1, 0.01, 0.00001, "BTC")
         security.SymbolProperties = binance_like_props
         security.FeeModel = PercentageFeeModel(0.001)  # 0.1% комиссия
+        security.SetLeverage(1.5)
 
         # ===== FUNDING DATA =====
         self.funding_symbol = self.AddData(BinanceFundingRateData,"BTC_FUNDING",Resolution.Hour).Symbol
@@ -225,17 +226,33 @@ class DonchianBTCWithFunding(QCAlgorithm):
 
     def CalculatePositionSize(self):
         atr = self.atr.Current.Value
+        if atr <= 0:
+            return 0
 
-        base_risk = self.Portfolio.TotalPortfolioValue * self.base_risk_per_trade
+        portfolio_value = self.Portfolio.TotalPortfolioValue
+
+        # === RISK-BASED SIZE ===
+        base_risk = portfolio_value * self.base_risk_per_trade
         adjusted_risk = base_risk * self.FundingRiskMultiplier()
 
         adjusted_risk = max(
-            self.min_risk_per_trade * self.Portfolio.TotalPortfolioValue,
-            min(adjusted_risk, self.max_risk_per_trade * self.Portfolio.TotalPortfolioValue)
+            self.min_risk_per_trade * portfolio_value,
+            min(adjusted_risk, self.max_risk_per_trade * portfolio_value)
         )
 
-        qty = adjusted_risk / (atr * self.DynamicATRStopMultiplier())
+        qty_risk = adjusted_risk / (atr * self.DynamicATRStopMultiplier())
+
+        # === BUYING POWER CAP ===
+        price = self.Securities[self.symbol].Price
+
+        # используем не больше 95% капитала
+        max_notional = portfolio_value * 0.95
+        qty_cap = max_notional / price
+
+        qty = min(qty_risk, qty_cap)
+
         return round(qty, 4)
+
 
 
     def FundingZScore(self):
