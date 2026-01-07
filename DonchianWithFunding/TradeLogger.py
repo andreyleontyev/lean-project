@@ -11,11 +11,12 @@ class TradeLogger:
         self.current_trade = None
         self.export_path = export_path or "/Lean/Data/exports"
     
-    def log_entry(self, entry_time, entry_price, funding, funding_z, bucket):
+    def log_entry(self, entry_time, entry_price, quantity, funding, funding_z, bucket):
         """Логирует вход в сделку"""
         self.current_trade = {
             "entry_time": entry_time,
             "entry_price": entry_price,
+            "quantity": quantity,
             "funding": funding,
             "funding_z": funding_z,
             "bucket": bucket

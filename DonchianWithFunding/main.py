@@ -181,6 +181,7 @@ class DonchianBTCWithFunding(QCAlgorithm):
         self.trade_logger.log_entry(
             entry_time=self.Time,
             entry_price=price,
+            quantity=qty,
             funding=self.last_funding_rate,
             funding_z=z,
             bucket=self.FundingBucket(z)
@@ -270,10 +271,11 @@ class DonchianBTCWithFunding(QCAlgorithm):
             entry_price = self.trade_logger.current_trade["entry_price"]
             entry_time = self.trade_logger.current_trade["entry_time"]
             
-            pnl = exit_price - entry_price
+            qty = abs(self.trade_logger.current_trade["quantity"])
+            pnl = (exit_price - entry_price) * qty
             z = self.FundingZScore()
             atr_stop_multiplier = self.position_manager.get_atr_stop_multiplier(z)
-            risk = self.atr.Current.Value * atr_stop_multiplier
+            risk = self.atr.Current.Value * atr_stop_multiplier * qty
             r = pnl / risk if risk > 0 else 0
             holding_hours = (self.Time - entry_time).total_seconds() / 3600
 
