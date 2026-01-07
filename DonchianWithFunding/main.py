@@ -2,9 +2,8 @@ from AlgorithmImports import *
 from datetime import datetime
 from BinanceFundingRateData import BinanceFundingRateData
 from BinanceHourlyBTC import BinanceHourlyBTC
+from TradeLogger import TradeLogger
 from collections import deque
-import csv
-import os
 
 # --- КЛАСС КОМИССИИ ---
 class PercentageFeeModel(FeeModel):
@@ -31,10 +30,16 @@ class DonchianBTCWithFunding(QCAlgorithm):
         self.last_funding_time = None
 
         self.funding_window = deque(maxlen=168)  # ~7 дней
+
+
         self.min_funding_samples = 30
         self.prev_quantity = 0
 
-        self.trade_logs = []
+        # ===== TRADE LOGGER =====
+        export_path = self.GetParameter("export_path")
+        if not export_path:
+            export_path = "/Lean/Data/exports"
+        self.trade_logger = TradeLogger(export_path=export_path)
 
         # 1. Добавляем ваши кастомные данные
         # LEAN создаст инструмент с дефолтными настройками (LotSize=1, Market=Empty)
@@ -82,7 +87,8 @@ class DonchianBTCWithFunding(QCAlgorithm):
         self.max_risk_per_trade = 0.02
         self.min_risk_per_trade = 0.003
 
-        self.stop_ticket = None
+        # ===== POSITION MANAGER =====
+        self.position_manager = PositionManager(price_round=DonchianBTCWithFunding.BTC_PRICE_ROUND)
 
         self.SetWarmUp(300)
 
@@ -108,10 +114,9 @@ class DonchianBTCWithFunding(QCAlgorithm):
     def _update_funding_rate(self, data: Slice):
         if data.ContainsKey(self.funding_symbol):
             funding = data[self.funding_symbol].Value
-            if funding != 0:
-                self.last_funding_rate = funding
-                self.last_funding_time = self.Time
-                self.funding_window.append(funding)
+            self.last_funding_rate = funding
+            self.last_funding_time = self.Time
+            self.funding_window.append(funding)
 
     def _should_process_data(self, data: Slice) -> bool:
         """Проверяет все условия для продолжения обработки данных"""
@@ -160,28 +165,35 @@ class DonchianBTCWithFunding(QCAlgorithm):
         if not (breakout and trend_ok and volatility_ok):
             return
 
-        qty = self.CalculatePositionSize()
+        qty = self.position_manager.calculate_position_size(
+            atr_value=self.atr.Current.Value,
+            portfolio_value=self.Portfolio.TotalPortfolioValue,
+            price=price,
+            funding_z=z,
+            base_risk_per_trade=self.base_risk_per_trade,
+            min_risk_per_trade=self.min_risk_per_trade,
+            max_risk_per_trade=self.max_risk_per_trade
+        )
         if qty <= 0:
             return
 
         #======= LOGGING =======
-        z = self.FundingZScore()
-
-        self.current_trade = {
-            "entry_time": self.Time,
-            "entry_price": price,
-            "funding": self.last_funding_rate,
-            "funding_z": z,
-            "bucket": self.FundingBucket(z)
-        }
-
+        self.trade_logger.log_entry(
+            entry_time=self.Time,
+            entry_price=price,
+            funding=self.last_funding_rate,
+            funding_z=z,
+            bucket=self.FundingBucket(z)
+        )
         #======= END LOGGING =======
 
         self.MarketOrder(self.symbol, qty)
 
-        stop_price = price - self.DynamicATRStopMultiplier() * self.atr.Current.Value
+        atr_stop_multiplier = self.position_manager.get_atr_stop_multiplier(z)
+        stop_price = price - atr_stop_multiplier * self.atr.Current.Value
         stop_price = round(stop_price, DonchianBTCWithFunding.BTC_PRICE_ROUND)
-        self.stop_ticket = self.StopMarketOrder(self.symbol, -qty, stop_price)
+        stop_ticket = self.StopMarketOrder(self.symbol, -qty, stop_price)
+        self.position_manager.set_stop_ticket(stop_ticket)
 
     def _manage_position(self, price: float):
         """Управляет открытой позицией: выходы и обновление стоп-лосса"""
@@ -189,8 +201,9 @@ class DonchianBTCWithFunding(QCAlgorithm):
         entry_price = holding.AveragePrice
         atr = self.atr.Current.Value
         
+        z = self.FundingZScore()
         # Вычисляем текущий R (отношение прибыли к риску)
-        r = (price - entry_price) / (self.DynamicATRStopMultiplier() * atr)
+        r = self.position_manager.calculate_r_ratio(price, entry_price, atr, z)
         
         # 1. Donchian hard exit
         if self._check_donchian_exit(price):
@@ -198,60 +211,20 @@ class DonchianBTCWithFunding(QCAlgorithm):
         
         # 2. Breakeven stop
         if r > 1.0:
-            self.UpdateStop(entry_price)
+            self.position_manager.update_stop(entry_price)
         
         # 3. EMA trailing stop (только улучшаем)
         if r > 2.0 and self.ema50.IsReady:
             ema = self.ema50.Current.Value
             new_stop = max(entry_price, ema)
-            self.UpdateStop(new_stop)
+            self.position_manager.update_stop(new_stop)
 
     def _check_donchian_exit(self, price):
         if self.dc_exit.IsReady and price < self.dc_exit.LowerBand.Current.Value:
-            if self.stop_ticket:
-                self.stop_ticket.Cancel()
+            self.position_manager.cancel_stop()
             self.Liquidate(self.symbol)
-            self.stop_ticket = None
             return True
         return False
-
-
-    def UpdateStop(self, new_price):
-        if self.stop_ticket is None:
-            return
-
-        update = UpdateOrderFields()
-        update.StopPrice = round(new_price, DonchianBTCWithFunding.BTC_PRICE_ROUND)
-        self.stop_ticket.Update(update)
-
-    def CalculatePositionSize(self):
-        atr = self.atr.Current.Value
-        if atr <= 0:
-            return 0
-
-        portfolio_value = self.Portfolio.TotalPortfolioValue
-
-        # === RISK-BASED SIZE ===
-        base_risk = portfolio_value * self.base_risk_per_trade
-        adjusted_risk = base_risk * self.FundingRiskMultiplier()
-
-        adjusted_risk = max(
-            self.min_risk_per_trade * portfolio_value,
-            min(adjusted_risk, self.max_risk_per_trade * portfolio_value)
-        )
-
-        qty_risk = adjusted_risk / (atr * self.DynamicATRStopMultiplier())
-
-        # === BUYING POWER CAP ===
-        price = self.Securities[self.symbol].Price
-
-        # используем не больше 95% капитала
-        max_notional = portfolio_value * 0.95
-        qty_cap = max_notional / price
-
-        qty = min(qty_risk, qty_cap)
-
-        return round(qty, 4)
 
 
 
@@ -273,22 +246,6 @@ class DonchianBTCWithFunding(QCAlgorithm):
         # 🔒 защита от числовых выбросов
         return max(-5.0, min(5.0, z))
 
-    def FundingRiskMultiplier(self):
-        z = self.FundingZScore()
-
-        if z < -1.0:
-            return 1.5   # рынок платит за лонг
-        elif z > 1.0:
-            return 0.5   # crowding, режем риск
-        return 1.0
-
-    def DynamicATRStopMultiplier(self):
-        z = self.FundingZScore()
-        if z > 1.0:
-            return 2.0   # tighter
-        if z < -1.0:
-            return 3.0   # даём тренду дышать
-        return 2.5
 
     def FundingBucket(self, z):
         for low, high in self.funding_buckets:
@@ -305,81 +262,144 @@ class DonchianBTCWithFunding(QCAlgorithm):
 
         # === DETECT POSITION CLOSE ===
         if self.prev_quantity != 0 and current_qty == 0:
-            if not hasattr(self, "current_trade") or self.current_trade is None:
+            if self.trade_logger.current_trade is None:
                 self.prev_quantity = current_qty
                 return
 
-            trade = self.current_trade
             exit_price = orderEvent.FillPrice
+            entry_price = self.trade_logger.current_trade["entry_price"]
+            entry_time = self.trade_logger.current_trade["entry_time"]
+            
+            pnl = exit_price - entry_price
+            z = self.FundingZScore()
+            atr_stop_multiplier = self.position_manager.get_atr_stop_multiplier(z)
+            risk = self.atr.Current.Value * atr_stop_multiplier
+            r = pnl / risk if risk > 0 else 0
+            holding_hours = (self.Time - entry_time).total_seconds() / 3600
 
-            trade["exit_time"] = self.Time
-            trade["exit_price"] = exit_price
+            self.trade_logger.log_exit(
+                exit_time=self.Time,
+                exit_price=exit_price,
+                pnl=pnl,
+                r=r,
+                holding_hours=holding_hours
+            )
 
-            pnl = exit_price - trade["entry_price"]
-            trade["pnl"] = pnl
-
-            risk = self.atr.Current.Value * self.DynamicATRStopMultiplier()
-            trade["R"] = pnl / risk if risk > 0 else 0
-
-            trade["holding_hours"] = (
-                trade["exit_time"] - trade["entry_time"]
-            ).total_seconds() / 3600
-
-            self.trade_logs.append(trade)
-            self.current_trade = None
-
-            self.Debug(f"TRADE CLOSED | R={round(trade['R'],2)}")
+            self.Debug(f"TRADE CLOSED | R={round(r,2)}")
 
         self.prev_quantity = current_qty
 
-
-
     def OnEndOfAlgorithm(self):
+        self.trade_logger.export_to_csv(debug_callback=self.Debug)
 
-        if not self.trade_logs:
-            self.Debug("No trades to export")
-            return
 
-        self.Debug(f"Total trades collected: {len(self.trade_logs)}")
 
-        filename = "trade_log.csv"
+class PositionManager:
+    def __init__(self, price_round=2):
+        self.stop_ticket = None
+        self.price_round = price_round
 
-        base_path = self.GetParameter("export_path")
-        if not base_path:
-            base_path = "/Lean/Data/exports"
+    def set_stop_ticket(self, ticket):
+        """Устанавливает ордер стоп-лосса"""
+        self.stop_ticket = ticket
 
-        filepath = os.path.join(base_path, filename)
-        os.makedirs(os.path.dirname(filepath), exist_ok=True)
+    def clear_stop_ticket(self):
+        """Очищает ссылку на стоп-лосс"""
+        self.stop_ticket = None
 
-        fieldnames = [
-            "entry_time",
-            "exit_time",
-            "entry_price",
-            "exit_price",
-            "pnl",
-            "R",
-            "holding_hours",
-            "funding",
-            "funding_z",
-            "bucket"
-        ]
+    def cancel_stop(self):
+        """Отменяет стоп-лосс ордер"""
+        if self.stop_ticket:
+            self.stop_ticket.Cancel()
+            self.stop_ticket = None
 
-        with open(filepath, mode="w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writeheader()
+    def update_stop(self, new_price):
+        """Обновляет цену стоп-лосса"""
+        if self.stop_ticket is None:
+            return False
 
-            for trade in self.trade_logs:
-                writer.writerow({
-                    "entry_time": trade["entry_time"],
-                    "exit_time": trade["exit_time"],
-                    "entry_price": round(trade["entry_price"], 2),
-                    "exit_price": round(trade["exit_price"], 2),
-                    "pnl": round(trade["pnl"], 2),
-                    "R": round(trade["R"], 2),
-                    "holding_hours": round(trade["holding_hours"], 2),
-                    "funding": trade["funding"],
-                    "funding_z": round(trade["funding_z"], 2),
-                    "bucket": trade["bucket"]
-                })
+        update = UpdateOrderFields()
+        update.StopPrice = round(new_price, self.price_round)
+        self.stop_ticket.Update(update)
+        return True
 
-        self.Debug(f"Exported {len(self.trade_logs)} trades to {filepath}")
+    def calculate_position_size(self, atr_value, portfolio_value, price, funding_z, 
+                                base_risk_per_trade, min_risk_per_trade, max_risk_per_trade):
+        """
+        Рассчитывает размер позиции на основе риска
+        
+        Args:
+            atr_value: текущее значение ATR
+            portfolio_value: стоимость портфеля
+            price: текущая цена инструмента
+            funding_z: Z-score funding rate
+            base_risk_per_trade: базовый риск на сделку (доля портфеля)
+            min_risk_per_trade: минимальный риск на сделку
+            max_risk_per_trade: максимальный риск на сделку
+        
+        Returns:
+            Размер позиции (количество)
+        """
+        if atr_value <= 0:
+            return 0
+
+        # === RISK-BASED SIZE ===
+        base_risk = portfolio_value * base_risk_per_trade
+        risk_multiplier = self.get_risk_multiplier(funding_z)
+        adjusted_risk = base_risk * risk_multiplier
+
+        adjusted_risk = max(
+            min_risk_per_trade * portfolio_value,
+            min(adjusted_risk, max_risk_per_trade * portfolio_value)
+        )
+
+        atr_stop_multiplier = self.get_atr_stop_multiplier(funding_z)
+        qty_risk = adjusted_risk / (atr_value * atr_stop_multiplier)
+
+        # === BUYING POWER CAP ===
+        # используем не больше 95% капитала
+        max_notional = portfolio_value * 0.95
+        qty_cap = max_notional / price
+
+        qty = min(qty_risk, qty_cap)
+        return round(qty, 4)
+
+    def get_atr_stop_multiplier(self, funding_z):
+        """
+        Возвращает множитель для ATR стоп-лосса в зависимости от funding Z-score
+        """
+        if funding_z > 1.0:
+            return 2.0   # tighter
+        if funding_z < -1.0:
+            return 3.0   # даём тренду дышать
+        return 2.5
+
+    def get_risk_multiplier(self, funding_z):
+        """
+        Возвращает множитель риска в зависимости от funding Z-score
+        """
+        if funding_z < -1.0:
+            return 1.5   # рынок платит за лонг
+        elif funding_z > 1.0:
+            return 0.5   # crowding, режем риск
+        return 1.0
+
+    def calculate_r_ratio(self, current_price, entry_price, atr_value, funding_z):
+        """
+        Рассчитывает R-отношение (прибыль/риск)
+        
+        Args:
+            current_price: текущая цена
+            entry_price: цена входа
+            atr_value: текущее значение ATR
+            funding_z: Z-score funding rate
+        
+        Returns:
+            R-отношение
+        """
+        atr_stop_multiplier = self.get_atr_stop_multiplier(funding_z)
+        risk = atr_value * atr_stop_multiplier
+        if risk <= 0:
+            return 0
+        return (current_price - entry_price) / risk
+
