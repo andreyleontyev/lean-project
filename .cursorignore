@@ -3,16 +3,13 @@
 node_modules/
 vendor/
 
+MyOfflineStrategy/
+DonchianStrategy/
 
-MyOfflineStrategy/__pycache__
-MyOfflineStrategy/.idea
-MyOfflineStrategy/.vscode
-MyOfflineStrategy/backtests
 report.html
 **/*.zip 
 #ignore all csv files - custom data
 **/*.csv 
-
 
 # Секреты и ключи (ОБЯЗАТЕЛЬНО)
 .env
