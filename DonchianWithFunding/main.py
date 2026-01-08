@@ -177,6 +177,10 @@ class DonchianBTCWithFunding(QCAlgorithm):
         if qty <= 0:
             return
 
+        funding_z = z
+        atr_at_entry = self.atr.Current.Value
+        atr_stop_multiplier = self.position_manager.get_atr_stop_multiplier(funding_z)
+
         #======= LOGGING =======
         self.trade_logger.log_entry(
             entry_time=self.Time,
@@ -184,13 +188,14 @@ class DonchianBTCWithFunding(QCAlgorithm):
             quantity=qty,
             funding=self.last_funding_rate,
             funding_z=z,
-            bucket=self.FundingBucket(z)
+            bucket=self.FundingBucket(z),
+            atr_at_entry=atr_at_entry,
+            atr_stop_multiplier=atr_stop_multiplier
         )
         #======= END LOGGING =======
 
         self.MarketOrder(self.symbol, qty)
 
-        atr_stop_multiplier = self.position_manager.get_atr_stop_multiplier(z)
         stop_price = price - atr_stop_multiplier * self.atr.Current.Value
         stop_price = round(stop_price, DonchianBTCWithFunding.BTC_PRICE_ROUND)
         stop_ticket = self.StopMarketOrder(self.symbol, -qty, stop_price)

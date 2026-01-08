@@ -11,7 +11,7 @@ class TradeLogger:
         self.current_trade = None
         self.export_path = export_path or "/Lean/Data/exports"
     
-    def log_entry(self, entry_time, entry_price, quantity, funding, funding_z, bucket):
+    def log_entry(self, entry_time, entry_price, quantity, funding, funding_z, bucket, atr_at_entry, atr_stop_multiplier):
         """Логирует вход в сделку"""
         self.current_trade = {
             "entry_time": entry_time,
@@ -19,7 +19,9 @@ class TradeLogger:
             "quantity": quantity,
             "funding": funding,
             "funding_z": funding_z,
-            "bucket": bucket
+            "bucket": bucket,
+            "atr_at_entry": atr_at_entry,   
+            "atr_stop_multiplier": atr_stop_multiplier
         }
     
     def log_exit(self, exit_time, exit_price, pnl, r, holding_hours):
@@ -60,7 +62,10 @@ class TradeLogger:
             "holding_hours",
             "funding",
             "funding_z",
-            "bucket"
+            "bucket",
+            "quantity",
+            "atr_at_entry",
+            "atr_stop_multiplier"
         ]
         
         with open(filepath, mode="w", newline="") as f:
@@ -78,7 +83,10 @@ class TradeLogger:
                     "holding_hours": round(trade["holding_hours"], 2),
                     "funding": trade["funding"],
                     "funding_z": round(trade["funding_z"], 2),
-                    "bucket": trade["bucket"]
+                    "bucket": trade["bucket"],
+                    "quantity": trade["quantity"],
+                    "atr_at_entry": trade["atr_at_entry"],
+                    "atr_stop_multiplier": trade["atr_stop_multiplier"]
                 })
         
         if debug_callback:
