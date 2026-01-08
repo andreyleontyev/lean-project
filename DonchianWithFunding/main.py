@@ -26,6 +26,8 @@ class DonchianBTCWithFunding(QCAlgorithm):
         self.SetEndDate(2026, 1, 1)
         self.SetCash(100000)
 
+        self.trade_context = None
+
         self.last_funding_rate = 0.0
         self.last_funding_time = None
 
@@ -98,7 +100,7 @@ class DonchianBTCWithFunding(QCAlgorithm):
         if not self._should_process_data(data):
             return
 
-        price = data[self.symbol].Close
+        close_price = data[self.symbol].Close
         
         if not self._check_volatility_filter():
             return
@@ -106,10 +108,10 @@ class DonchianBTCWithFunding(QCAlgorithm):
         invested = self.Portfolio[self.symbol].Invested
         
         if not invested:
-            self._try_long_entry(price, data)
+            self._try_long_entry(close_price, data)
             return
 
-        self._manage_position(price)
+        self._manage_position(close_price)
 
     def _update_funding_rate(self, data: Slice):
         if data.ContainsKey(self.funding_symbol):
@@ -179,54 +181,74 @@ class DonchianBTCWithFunding(QCAlgorithm):
 
         funding_z = z
         atr_at_entry = self.atr.Current.Value
-        atr_stop_multiplier = self.position_manager.get_atr_stop_multiplier(funding_z)
-
-        #======= LOGGING =======
-        self.trade_logger.log_entry(
-            entry_time=self.Time,
-            entry_price=price,
-            quantity=qty,
-            funding=self.last_funding_rate,
-            funding_z=z,
-            bucket=self.FundingBucket(z),
-            atr_at_entry=atr_at_entry,
-            atr_stop_multiplier=atr_stop_multiplier
-        )
-        #======= END LOGGING =======
+        stop_multiplier = self.position_manager.get_atr_stop_multiplier(funding_z)
+        risk_multiplier = self.position_manager.get_risk_multiplier(funding_z)
+        initial_stop = price - stop_multiplier * atr_at_entry
 
         self.MarketOrder(self.symbol, qty)
 
-        stop_price = price - atr_stop_multiplier * self.atr.Current.Value
+        self.trade_context = TradeContext(
+            entry_time=self.Time,
+            entry_price=price,
+            quantity=qty,
+            funding_z=funding_z,
+            atr_value=atr_at_entry,
+            stop_multiplier=stop_multiplier,
+            risk_multiplier=risk_multiplier,
+            initial_stop=initial_stop
+        )
+
+        #======= LOGGING =======
+        self.trade_logger.log_entry(
+            entry_time=self.trade_context.entry_time,
+            entry_price=self.trade_context.entry_price,
+            quantity=self.trade_context.quantity,
+            funding=self.last_funding_rate,
+            funding_z=self.trade_context.funding_z,
+            bucket=self.FundingBucket(self.trade_context.funding_z),
+            atr_at_entry=self.trade_context.atr_at_entry,
+            atr_stop_multiplier=self.trade_context.stop_multiplier
+        )
+        #======= END LOGGING =======
+
+        stop_price = self.trade_context.initial_stop
         stop_price = round(stop_price, DonchianBTCWithFunding.BTC_PRICE_ROUND)
         stop_ticket = self.StopMarketOrder(self.symbol, -qty, stop_price)
         self.position_manager.set_stop_ticket(stop_ticket)
 
-    def _manage_position(self, price: float):
+    def _manage_position(self, close_price: float):
         """Управляет открытой позицией: выходы и обновление стоп-лосса"""
-        holding = self.Portfolio[self.symbol]
-        entry_price = holding.AveragePrice
-        atr = self.atr.Current.Value
+        tc = self.trade_context
+        tc.max_price = max(tc.max_price, close_price)
         
-        z = self.FundingZScore()
-        # Вычисляем текущий R (отношение прибыли к риску)
-        r = self.position_manager.calculate_r_ratio(price, entry_price, atr, z)
+        risk_per_unit = tc.atr_at_entry * tc.stop_multiplier
+        r = (close_price - tc.entry_price) / risk_per_unit
         
         # 1. Donchian hard exit
-        if self._check_donchian_exit(price):
+        if self._check_donchian_exit(close_price):
             return
         
         # 2. Breakeven stop
-        if r > 1.0:
-            self.position_manager.update_stop(entry_price)
+        if r > 1.0 and tc.max_price > tc.entry_price + 0.75 * tc.atr_at_entry:
+            tc.current_stop = tc.entry_price
+            self.position_manager.update_stop(tc.current_stop)
         
         # 3. EMA trailing stop (только улучшаем)
-        if r > 2.0 and self.ema50.IsReady:
-            ema = self.ema50.Current.Value
-            new_stop = max(entry_price, ema)
-            self.position_manager.update_stop(new_stop)
+        if r > 2.0:
+            current_atr = self.atr.Current.Value
+            trail = tc.max_price - tc.stop_multiplier * current_atr
+            if trail > tc.current_stop:
+                tc.current_stop = trail
+                self.position_manager.update_stop(tc.current_stop)
 
-    def _check_donchian_exit(self, price):
-        if self.dc_exit.IsReady and price < self.dc_exit.LowerBand.Current.Value:
+        # 4. Soft EMA exit (только после хорошего хода)
+        if r > 3.0 and close_price < self.ema50.Current.Value:
+            self.position_manager.cancel_stop()
+            self.Liquidate(self.symbol)
+            return
+
+    def _check_donchian_exit(self, close_price):
+        if self.dc_exit.IsReady and close_price < self.dc_exit.LowerBand.Current.Value:
             self.position_manager.cancel_stop()
             self.Liquidate(self.symbol)
             return True
@@ -273,16 +295,18 @@ class DonchianBTCWithFunding(QCAlgorithm):
                 return
 
             exit_price = orderEvent.FillPrice
-            entry_price = self.trade_logger.current_trade["entry_price"]
-            entry_time = self.trade_logger.current_trade["entry_time"]
+            entry_price = self.trade_context.entry_price
+            entry_time = self.trade_context.entry_time
             
-            qty = abs(self.trade_logger.current_trade["quantity"])
+            qty = abs(self.trade_context.quantity)
             pnl = (exit_price - entry_price) * qty
-            z = self.FundingZScore()
-            atr_stop_multiplier = self.position_manager.get_atr_stop_multiplier(z)
-            risk = self.atr.Current.Value * atr_stop_multiplier * qty
+
+            risk = self.trade_context.atr_at_entry * self.trade_context.stop_multiplier * qty
             r = pnl / risk if risk > 0 else 0
             holding_hours = (self.Time - entry_time).total_seconds() / 3600
+
+            self.trade_context = None
+            self.position_manager.clear_stop_ticket()
 
             self.trade_logger.log_exit(
                 exit_time=self.Time,
@@ -409,4 +433,31 @@ class PositionManager:
         if risk <= 0:
             return 0
         return (current_price - entry_price) / risk
+
+
+class TradeContext:
+    def __init__(self,
+                 entry_time,
+                 entry_price,
+                 quantity,
+                 funding_z,
+                 atr_value,
+                 stop_multiplier,
+                 risk_multiplier,
+                 initial_stop):
+
+        self.entry_time = entry_time
+        self.entry_price = entry_price
+        self.quantity = quantity
+
+        # === FIXED REGIME ===
+        self.funding_z = funding_z
+        self.atr_at_entry = atr_value
+        self.stop_multiplier = stop_multiplier
+        self.risk_multiplier = risk_multiplier
+
+        # === RUNTIME STATE ===
+        self.initial_stop = initial_stop
+        self.current_stop = self.initial_stop
+        self.max_price = entry_price  # для трейлинга
 
