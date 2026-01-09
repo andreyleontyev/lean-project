@@ -27,13 +27,40 @@ class DonchianBTCWithFunding(QCAlgorithm):
         self.SetEndDate(2026, 1, 1)
         self.SetCash(100000)
 
+        # ===== OPTIMIZATION PARAMETERS =====
+
+        # --- Donchian ---
+        self.dc_entry_len = int(self.GetParameter("dc_entry_len") or 20)
+        self.dc_exit_len  = int(self.GetParameter("dc_exit_len") or 10)
+
+        # --- ATR / Stops ---
+        self.atr_period = int(self.GetParameter("atr_period") or 14)
+
+        self.atr_stop_negative = float(self.GetParameter("atr_stop_negative") or 3.0)
+        self.atr_stop_neutral  = float(self.GetParameter("atr_stop_neutral")  or 2.5)
+        self.atr_stop_positive = float(self.GetParameter("atr_stop_positive") or 2.0)
+
+        # --- Risk multipliers ---
+        self.risk_boost_negative = float(self.GetParameter("risk_boost_negative") or 1.5)
+        self.risk_neutral        = float(self.GetParameter("risk_neutral") or 1.0)
+        self.risk_cut_positive   = float(self.GetParameter("risk_cut_positive") or 0.5)
+
+        # --- Breakeven ---
+        self.breakeven_r = float(self.GetParameter("breakeven_r") or 1.0)
+        self.breakeven_atr_frac = float(self.GetParameter("breakeven_atr_frac") or 0.75)
+
+        # --- Trailing / exits ---
+        self.trail_start_r = float(self.GetParameter("trail_start_r") or 2.0)
+        self.soft_exit_r   = float(self.GetParameter("soft_exit_r") or 3.0)
+
+        # ===== END OPTIMIZATION PARAMETERS =====
+
         self.trade_context = None
 
         self.last_funding_rate = 0.0
         self.last_funding_time = None
 
         self.funding_window = deque(maxlen=168)  # ~7 дней
-
 
         self.min_funding_samples = 30
         self.prev_quantity = 0
@@ -72,13 +99,13 @@ class DonchianBTCWithFunding(QCAlgorithm):
         ]
 
         # ===== INDICATORS =====
-        self.dc_entry = DonchianChannel(20)
-        self.dc_exit  = DonchianChannel(10)
+        self.dc_entry = DonchianChannel(self.dc_entry_len)
+        self.dc_exit  = DonchianChannel(self.dc_exit_len)
 
         self.ema200 = self.EMA(self.symbol, 200, Resolution.Hour)
         self.ema50  = self.EMA(self.symbol, 50, Resolution.Hour)
+        self.atr = self.ATR(self.symbol, period=self.atr_period, MovingAverageType.Simple, Resolution.Hour)
 
-        self.atr = self.ATR(self.symbol, 14, MovingAverageType.Simple, Resolution.Hour)
         self.atr_sma = SimpleMovingAverage(50)
 
         self.RegisterIndicator(self.symbol, self.dc_entry, Resolution.Hour)
@@ -91,7 +118,15 @@ class DonchianBTCWithFunding(QCAlgorithm):
         self.min_risk_per_trade = 0.003
 
         # ===== POSITION MANAGER =====
-        self.position_manager = PositionManager(price_round=DonchianBTCWithFunding.BTC_PRICE_ROUND)
+        self.position_manager = PositionManager(
+            price_round=DonchianBTCWithFunding.BTC_PRICE_ROUND,
+            atr_stop_negative=self.atr_stop_negative,
+            atr_stop_neutral=self.atr_stop_neutral,
+            atr_stop_positive=self.atr_stop_positive,
+            risk_boost_negative=self.risk_boost_negative,
+            risk_neutral=self.risk_neutral,
+            risk_cut_positive=self.risk_cut_positive
+        )
 
         self.SetWarmUp(300)
 
@@ -239,12 +274,12 @@ class DonchianBTCWithFunding(QCAlgorithm):
             return
         
         # 2. Breakeven stop
-        if r > 1.0 and tc.max_price > tc.entry_price + 0.75 * tc.atr_at_entry:
+        if r > self.breakeven_r and tc.max_price > tc.entry_price + self.breakeven_atr_frac * tc.atr_at_entry:
             tc.current_stop = tc.entry_price
             self.position_manager.update_stop(tc.current_stop)
         
         # 3. EMA trailing stop (только улучшаем)
-        if r > 2.0:
+        if r > self.trail_start_r:
             current_atr = self.atr.Current.Value
             trail = tc.max_price - tc.stop_multiplier * current_atr
             if trail > tc.current_stop:
@@ -252,7 +287,7 @@ class DonchianBTCWithFunding(QCAlgorithm):
                 self.position_manager.update_stop(tc.current_stop)
 
         # 4. Soft EMA exit (только после хорошего хода)
-        if r > 3.0 and close_price < self.ema50.Current.Value:
+        if r > self.soft_exit_r and close_price < self.ema50.Current.Value:
             self.position_manager.cancel_stop()
             self.Liquidate(self.symbol)
             return
@@ -336,11 +371,26 @@ class DonchianBTCWithFunding(QCAlgorithm):
         self.trade_logger.export_to_csv(debug_callback=self.Debug)
 
 
-
 class PositionManager:
-    def __init__(self, price_round=2):
+    def __init__(self, price_round,
+                 atr_stop_negative,
+                 atr_stop_neutral,
+                 atr_stop_positive,
+                 risk_boost_negative,
+                 risk_neutral,
+                 risk_cut_positive):
+
         self.stop_ticket = None
         self.price_round = price_round
+
+        self.atr_stop_negative = atr_stop_negative
+        self.atr_stop_neutral  = atr_stop_neutral
+        self.atr_stop_positive = atr_stop_positive
+
+        self.risk_boost_negative = risk_boost_negative
+        self.risk_neutral        = risk_neutral
+        self.risk_cut_positive   = risk_cut_positive
+
 
     def set_stop_ticket(self, ticket):
         """Устанавливает ордер стоп-лосса"""
@@ -408,24 +458,18 @@ class PositionManager:
         return round(qty, 4)
 
     def get_atr_stop_multiplier(self, funding_z):
-        """
-        Возвращает множитель для ATR стоп-лосса в зависимости от funding Z-score
-        """
         if funding_z > 1.0:
-            return 2.0   # tighter
+            return self.atr_stop_positive
         if funding_z < -1.0:
-            return 3.0   # даём тренду дышать
-        return 2.5
+            return self.atr_stop_negative
+        return self.atr_stop_neutral
 
     def get_risk_multiplier(self, funding_z):
-        """
-        Возвращает множитель риска в зависимости от funding Z-score
-        """
         if funding_z < -1.0:
-            return 1.5   # рынок платит за лонг
+            return self.risk_boost_negative
         elif funding_z > 1.0:
-            return 0.5   # crowding, режем риск
-        return 1.0
+            return self.risk_cut_positive
+        return self.risk_neutral
 
     def calculate_r_ratio(self, current_price, entry_price, atr_value, funding_z):
         """
