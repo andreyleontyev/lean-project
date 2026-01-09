@@ -5,6 +5,11 @@ from BinanceHourlyBTC import BinanceHourlyBTC
 from TradeLogger import TradeLogger
 from collections import deque
 from TradeContext import TradeContext
+import statistics
+import csv
+import os
+
+
 
 # --- КЛАСС КОМИССИИ ---
 class PercentageFeeModel(FeeModel):
@@ -57,6 +62,8 @@ class DonchianBTCWithFunding(QCAlgorithm):
 
         self.trade_context = None
 
+        self.run_r = []
+
         self.last_funding_rate = 0.0
         self.last_funding_time = None
 
@@ -104,7 +111,7 @@ class DonchianBTCWithFunding(QCAlgorithm):
 
         self.ema200 = self.EMA(self.symbol, 200, Resolution.Hour)
         self.ema50  = self.EMA(self.symbol, 50, Resolution.Hour)
-        self.atr = self.ATR(self.symbol, period=self.atr_period, MovingAverageType.Simple, Resolution.Hour)
+        self.atr = self.ATR(self.symbol, self.atr_period, type=MovingAverageType.Simple, resolution=Resolution.Hour)
 
         self.atr_sma = SimpleMovingAverage(50)
 
@@ -249,7 +256,7 @@ class DonchianBTCWithFunding(QCAlgorithm):
             entry_price=price,
             quantity=qty,
             funding_z=funding_z,
-            atr_value=atr_at_entry,
+            atr_at_entry=atr_at_entry,
             stop_multiplier=stop_multiplier,
             risk_multiplier=risk_multiplier,
             initial_stop=initial_stop,
@@ -289,6 +296,7 @@ class DonchianBTCWithFunding(QCAlgorithm):
         # 4. Soft EMA exit (только после хорошего хода)
         if r > self.soft_exit_r and close_price < self.ema50.Current.Value:
             self.position_manager.cancel_stop()
+            tc.exit_reason_hint = "SoftExit_EMA"
             self.Liquidate(self.symbol)
             return
 
@@ -356,10 +364,12 @@ class DonchianBTCWithFunding(QCAlgorithm):
                 return
 
             order = self.Transactions.GetOrderById(orderEvent.OrderId)
-            exit_reason = str(order.Type) if order else "Unknown"
+            exit_reason = getattr(self.trade_context, "exit_reason_hint", str(order.Type))
+            # exit_reason = str(order.Type) if order else "Unknown"
 
             self.trade_context.close(self.Time, orderEvent.FillPrice, exit_reason)
             self.trade_logger.log_trade(self.trade_context)
+            self.run_r.append(self.trade_context.r_multiple)
             self.Debug(f"TRADE CLOSED | R={round(self.trade_context.r_multiple,2)}")
             
             self.trade_context = None
@@ -369,6 +379,55 @@ class DonchianBTCWithFunding(QCAlgorithm):
 
     def OnEndOfAlgorithm(self):
         self.trade_logger.export_to_csv(debug_callback=self.Debug)
+
+        if self.run_r:
+            avg_r = sum(self.run_r) / len(self.run_r)
+            median_r = statistics.median(self.run_r)
+        else:
+            avg_r = 0
+            median_r = 0
+
+        def parse_stat(stat_value, default=0.0):
+            if stat_value is None:
+                return default
+            if isinstance(stat_value, (int, float)):
+                return float(stat_value)
+            if isinstance(stat_value, str):
+                return float(stat_value.rstrip("%"))
+            return default
+
+        sharpe_ratio = self.statistics.total_performance.portfolio_statistics.sharpe_ratio
+        drawdown_val = self.statistics.total_performance.portfolio_statistics.drawdown
+        start_equity = self.statistics.total_performance.portfolio_statistics.start_equity
+        end_equity = self.statistics.total_performance.portfolio_statistics.end_equity
+
+        trades_val = self.statistics.total_performance.trade_statistics.total_number_of_trades
+
+        row = {
+            "run_id": self.StartDate.strftime("%Y%m%d") + "_" + self.EndDate.strftime("%Y%m%d"),
+
+            # --- parameters ---
+            "atr_stop_neutral": self.atr_stop_neutral,
+            "trail_start_r": self.trail_start_r,
+            "breakeven_r": self.breakeven_r,
+
+            # --- metrics from Lean ---
+            "sharpe": sharpe_ratio,
+            "max_drawdown_pct": drawdown_val,
+            "total_return_pct": end_equity,
+            "trades": trades_val,
+            "avg_R": avg_r,
+            "median_R": median_r
+        }
+
+        path = "/Lean/Data/exports/run_metrics.csv"
+        file_exists = os.path.isfile(path)
+
+        with open(path, mode="a", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=row.keys())
+            if not file_exists:
+                writer.writeheader()
+            writer.writerow(row)
 
 
 class PositionManager:

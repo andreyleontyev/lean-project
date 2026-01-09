@@ -5,7 +5,7 @@ class TradeContext:
                  entry_price,
                  quantity,
                  funding_z,
-                 atr_value,
+                 atr_at_entry,
                  stop_multiplier,
                  risk_multiplier,
                  initial_stop,
@@ -18,7 +18,7 @@ class TradeContext:
 
         # === FIXED REGIME ===
         self.funding_z = funding_z
-        self.atr_at_entry = atr_value
+        self.atr_at_entry = atr_at_entry
         self.stop_multiplier = stop_multiplier
         self.risk_multiplier = risk_multiplier
 
