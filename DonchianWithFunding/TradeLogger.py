@@ -11,7 +11,7 @@ class TradeLogger:
         self.current_trade = None
         self.export_path = export_path or "/Lean/Data/exports"
     
-    def log_entry(self, entry_time, entry_price, quantity, funding, funding_z, bucket, atr_at_entry, atr_stop_multiplier):
+    def log_entry(self, entry_time, entry_price, quantity, funding, funding_z, bucket, atr_at_entry, atr_stop_multiplier, extra=None):
         """Логирует вход в сделку"""
         self.current_trade = {
             "entry_time": entry_time,
@@ -23,8 +23,10 @@ class TradeLogger:
             "atr_at_entry": atr_at_entry,   
             "atr_stop_multiplier": atr_stop_multiplier
         }
+        if extra:
+            self.current_trade.update(extra)
     
-    def log_exit(self, exit_time, exit_price, pnl, r, holding_hours):
+    def log_exit(self, exit_time, exit_price, pnl, r, holding_hours, extra=None):
         """Логирует выход из сделки"""
         if self.current_trade is None:
             return
@@ -35,6 +37,9 @@ class TradeLogger:
         trade["pnl"] = pnl
         trade["R"] = r
         trade["holding_hours"] = holding_hours
+        
+        if extra:
+            trade.update(extra)
         
         self.trade_logs.append(trade)
         self.current_trade = None
@@ -65,7 +70,21 @@ class TradeLogger:
             "bucket",
             "quantity",
             "atr_at_entry",
-            "atr_stop_multiplier"
+            "atr_stop_multiplier",
+            "entry_weekday",
+            "is_weekend",
+            "entry_hour",
+            "hour_bucket_4h",
+            "session",
+            "funding_sign",
+            "funding_extreme",
+            "atr_pct",
+            "ema_distance_pct",
+            "volatility_regime",
+            "exit_weekday",
+            "exit_hour",
+            "holding_bucket",
+            "exit_reason"
         ]
         
         with open(filepath, mode="w", newline="") as f:
@@ -86,7 +105,21 @@ class TradeLogger:
                     "bucket": trade["bucket"],
                     "quantity": trade["quantity"],
                     "atr_at_entry": trade["atr_at_entry"],
-                    "atr_stop_multiplier": trade["atr_stop_multiplier"]
+                    "atr_stop_multiplier": trade["atr_stop_multiplier"],
+                    "entry_weekday": trade.get("entry_weekday", ""),
+                    "is_weekend": trade.get("is_weekend", ""),
+                    "entry_hour": trade.get("entry_hour", ""),
+                    "hour_bucket_4h": trade.get("hour_bucket_4h", ""),
+                    "session": trade.get("session", ""),
+                    "funding_sign": trade.get("funding_sign", ""),
+                    "funding_extreme": trade.get("funding_extreme", ""),
+                    "atr_pct": trade.get("atr_pct", ""),
+                    "ema_distance_pct": trade.get("ema_distance_pct", ""),
+                    "volatility_regime": trade.get("volatility_regime", ""),
+                    "exit_weekday": trade.get("exit_weekday", ""),
+                    "exit_hour": trade.get("exit_hour", ""),
+                    "holding_bucket": trade.get("holding_bucket", ""),
+                    "exit_reason": trade.get("exit_reason", "")
                 })
         
         if debug_callback:

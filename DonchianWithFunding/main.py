@@ -198,6 +198,23 @@ class DonchianBTCWithFunding(QCAlgorithm):
             initial_stop=initial_stop
         )
 
+        dt = self.Time
+        weekday = dt.weekday()
+        hour = dt.hour
+
+        entry_features = {
+            "entry_weekday": weekday,
+            "is_weekend": int(weekday >= 5),
+            "entry_hour": hour,
+            "hour_bucket_4h": hour // 4,
+            "session": self.GetSession(hour),
+            "funding_sign": -1 if funding_z < -0.2 else (1 if funding_z > 0.2 else 0),
+            "funding_extreme": int(abs(funding_z) > 1.5),
+            "atr_pct": atr_at_entry / price,
+            "ema_distance_pct": (price - self.ema200.Current.Value) / price,
+            "volatility_regime": self.GetVolatilityRegime(self.atr.Current.Value, self.atr_sma.Current.Value)
+        }
+
         #======= LOGGING =======
         self.trade_logger.log_entry(
             entry_time=self.trade_context.entry_time,
@@ -207,7 +224,8 @@ class DonchianBTCWithFunding(QCAlgorithm):
             funding_z=self.trade_context.funding_z,
             bucket=self.FundingBucket(self.trade_context.funding_z),
             atr_at_entry=self.trade_context.atr_at_entry,
-            atr_stop_multiplier=self.trade_context.stop_multiplier
+            atr_stop_multiplier=self.trade_context.stop_multiplier,
+            extra=entry_features
         )
         #======= END LOGGING =======
 
@@ -274,6 +292,29 @@ class DonchianBTCWithFunding(QCAlgorithm):
         # 🔒 защита от числовых выбросов
         return max(-5.0, min(5.0, z))
 
+    def GetSession(self, hour):
+        if 0 <= hour < 7:
+            return "Asia"
+        if 7 <= hour < 13:
+            return "Europe"
+        if 13 <= hour < 20:
+            return "US"
+        return "LateUS"
+
+    def GetVolatilityRegime(self, atr, atr_sma):
+        ratio = atr / atr_sma
+        if ratio < 0.8:
+            return "low"
+        if ratio > 1.2:
+            return "high"
+        return "normal"
+
+    def HoldingBucket(self, hours):
+        if hours < 12:
+            return "<12h"
+        if hours < 48:
+            return "12-48h"
+        return "48h+"
 
     def FundingBucket(self, z):
         for low, high in self.funding_buckets:
@@ -305,6 +346,16 @@ class DonchianBTCWithFunding(QCAlgorithm):
             r = pnl / risk if risk > 0 else 0
             holding_hours = (self.Time - entry_time).total_seconds() / 3600
 
+            exit_dt = self.Time
+            order = self.Transactions.GetOrderById(orderEvent.OrderId)
+            exit_reason = str(order.Type) if order else "Unknown"
+            exit_features = {
+                "exit_weekday": exit_dt.weekday(),
+                "exit_hour": exit_dt.hour,
+                "holding_bucket": self.HoldingBucket(holding_hours),
+                "exit_reason": exit_reason
+            }
+
             self.trade_context = None
             self.position_manager.clear_stop_ticket()
 
@@ -313,7 +364,8 @@ class DonchianBTCWithFunding(QCAlgorithm):
                 exit_price=exit_price,
                 pnl=pnl,
                 r=r,
-                holding_hours=holding_hours
+                holding_hours=holding_hours,
+                extra=exit_features
             )
 
             self.Debug(f"TRADE CLOSED | R={round(r,2)}")
