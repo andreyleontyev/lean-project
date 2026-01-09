@@ -148,6 +148,25 @@ class DonchianBTCWithFunding(QCAlgorithm):
         # Торгуем только если текущая волатильность выше средней
         return self.atr.Current.Value > self.atr_sma.Current.Value
 
+    def _calculate_entry_features(self, price, funding_z, atr):
+        dt = self.Time
+        weekday = dt.weekday()
+        hour = dt.hour
+        return {
+            "entry_weekday": weekday,
+            "is_weekend": int(weekday >= 5),
+            "entry_hour": hour,
+            "hour_bucket_4h": hour // 4,
+            "session": self.GetSession(hour),
+            "funding_sign": -1 if funding_z < -0.2 else (1 if funding_z > 0.2 else 0),
+            "funding_extreme": int(abs(funding_z) > 1.5),
+            "atr_pct": atr / price,
+            "ema_distance_pct": (price - self.ema200.Current.Value) / price,
+            "volatility_regime": self.GetVolatilityRegime(atr, self.atr_sma.Current.Value),
+            "funding": self.last_funding_rate,
+            "bucket": self.FundingBucket(funding_z)
+        }
+
     def _try_long_entry(self, price: float, data: Slice):
         z = self.FundingZScore()
 
@@ -187,6 +206,8 @@ class DonchianBTCWithFunding(QCAlgorithm):
 
         self.MarketOrder(self.symbol, qty)
 
+        entry_features = self._calculate_entry_features(price, funding_z, atr_at_entry)
+
         self.trade_context = TradeContext(
             entry_time=self.Time,
             entry_price=price,
@@ -195,39 +216,9 @@ class DonchianBTCWithFunding(QCAlgorithm):
             atr_value=atr_at_entry,
             stop_multiplier=stop_multiplier,
             risk_multiplier=risk_multiplier,
-            initial_stop=initial_stop
+            initial_stop=initial_stop,
+            features=entry_features
         )
-
-        dt = self.Time
-        weekday = dt.weekday()
-        hour = dt.hour
-
-        entry_features = {
-            "entry_weekday": weekday,
-            "is_weekend": int(weekday >= 5),
-            "entry_hour": hour,
-            "hour_bucket_4h": hour // 4,
-            "session": self.GetSession(hour),
-            "funding_sign": -1 if funding_z < -0.2 else (1 if funding_z > 0.2 else 0),
-            "funding_extreme": int(abs(funding_z) > 1.5),
-            "atr_pct": atr_at_entry / price,
-            "ema_distance_pct": (price - self.ema200.Current.Value) / price,
-            "volatility_regime": self.GetVolatilityRegime(self.atr.Current.Value, self.atr_sma.Current.Value)
-        }
-
-        #======= LOGGING =======
-        self.trade_logger.log_entry(
-            entry_time=self.trade_context.entry_time,
-            entry_price=self.trade_context.entry_price,
-            quantity=self.trade_context.quantity,
-            funding=self.last_funding_rate,
-            funding_z=self.trade_context.funding_z,
-            bucket=self.FundingBucket(self.trade_context.funding_z),
-            atr_at_entry=self.trade_context.atr_at_entry,
-            atr_stop_multiplier=self.trade_context.stop_multiplier,
-            extra=entry_features
-        )
-        #======= END LOGGING =======
 
         stop_price = self.trade_context.initial_stop
         stop_price = round(stop_price, DonchianBTCWithFunding.BTC_PRICE_ROUND)
@@ -309,13 +300,6 @@ class DonchianBTCWithFunding(QCAlgorithm):
             return "high"
         return "normal"
 
-    def HoldingBucket(self, hours):
-        if hours < 12:
-            return "<12h"
-        if hours < 48:
-            return "12-48h"
-        return "48h+"
-
     def FundingBucket(self, z):
         for low, high in self.funding_buckets:
             if low <= z < high:
@@ -331,44 +315,19 @@ class DonchianBTCWithFunding(QCAlgorithm):
 
         # === DETECT POSITION CLOSE ===
         if self.prev_quantity != 0 and current_qty == 0:
-            if self.trade_logger.current_trade is None:
+            if self.trade_context is None:
                 self.prev_quantity = current_qty
                 return
 
-            exit_price = orderEvent.FillPrice
-            entry_price = self.trade_context.entry_price
-            entry_time = self.trade_context.entry_time
-            
-            qty = abs(self.trade_context.quantity)
-            pnl = (exit_price - entry_price) * qty
-
-            risk = self.trade_context.atr_at_entry * self.trade_context.stop_multiplier * qty
-            r = pnl / risk if risk > 0 else 0
-            holding_hours = (self.Time - entry_time).total_seconds() / 3600
-
-            exit_dt = self.Time
             order = self.Transactions.GetOrderById(orderEvent.OrderId)
             exit_reason = str(order.Type) if order else "Unknown"
-            exit_features = {
-                "exit_weekday": exit_dt.weekday(),
-                "exit_hour": exit_dt.hour,
-                "holding_bucket": self.HoldingBucket(holding_hours),
-                "exit_reason": exit_reason
-            }
 
+            self.trade_context.close(self.Time, orderEvent.FillPrice, exit_reason)
+            self.trade_logger.log_trade(self.trade_context)
+            self.Debug(f"TRADE CLOSED | R={round(self.trade_context.r_multiple,2)}")
+            
             self.trade_context = None
             self.position_manager.clear_stop_ticket()
-
-            self.trade_logger.log_exit(
-                exit_time=self.Time,
-                exit_price=exit_price,
-                pnl=pnl,
-                r=r,
-                holding_hours=holding_hours,
-                extra=exit_features
-            )
-
-            self.Debug(f"TRADE CLOSED | R={round(r,2)}")
 
         self.prev_quantity = current_qty
 
@@ -496,11 +455,13 @@ class TradeContext:
                  atr_value,
                  stop_multiplier,
                  risk_multiplier,
-                 initial_stop):
+                 initial_stop,
+                 features):
 
         self.entry_time = entry_time
         self.entry_price = entry_price
         self.quantity = quantity
+        self.features = features
 
         # === FIXED REGIME ===
         self.funding_z = funding_z
@@ -512,4 +473,56 @@ class TradeContext:
         self.initial_stop = initial_stop
         self.current_stop = self.initial_stop
         self.max_price = entry_price  # для трейлинга
+        
+        # === EXIT STATE ===
+        self.exit_time = None
+        self.exit_price = None
+        self.pnl = 0.0
+        self.r_multiple = 0.0
+        self.holding_hours = 0.0
+        self.exit_reason = None
+        self.exit_features = {}
+
+    def close(self, time, price, reason):
+        self.exit_time = time
+        self.exit_price = price
+        self.exit_reason = reason
+        
+        qty = abs(self.quantity)
+        self.pnl = (price - self.entry_price) * qty
+        
+        risk = self.atr_at_entry * self.stop_multiplier * qty
+        self.r_multiple = self.pnl / risk if risk > 0 else 0.0
+        
+        self.holding_hours = (time - self.entry_time).total_seconds() / 3600.0
+        
+        self.exit_features = {
+            "exit_weekday": time.weekday(),
+            "exit_hour": time.hour,
+            "holding_bucket": self._holding_bucket(self.holding_hours),
+            "exit_reason": reason
+        }
+
+    def _holding_bucket(self, hours):
+        if hours < 12: return "<12h"
+        if hours < 48: return "12-48h"
+        return "48h+"
+
+    def to_dict(self):
+        data = self.features.copy()
+        data.update(self.exit_features)
+        data.update({
+            "entry_time": self.entry_time,
+            "exit_time": self.exit_time,
+            "entry_price": self.entry_price,
+            "exit_price": self.exit_price,
+            "pnl": self.pnl,
+            "R": self.r_multiple,
+            "holding_hours": self.holding_hours,
+            "quantity": self.quantity,
+            "atr_at_entry": self.atr_at_entry,
+            "atr_stop_multiplier": self.stop_multiplier,
+            "funding_z": self.funding_z
+        })
+        return data
 

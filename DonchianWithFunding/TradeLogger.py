@@ -8,41 +8,13 @@ class TradeLogger:
     
     def __init__(self, export_path=None):
         self.trade_logs = []
-        self.current_trade = None
         self.export_path = export_path or "/Lean/Data/exports"
     
-    def log_entry(self, entry_time, entry_price, quantity, funding, funding_z, bucket, atr_at_entry, atr_stop_multiplier, extra=None):
-        """Логирует вход в сделку"""
-        self.current_trade = {
-            "entry_time": entry_time,
-            "entry_price": entry_price,
-            "quantity": quantity,
-            "funding": funding,
-            "funding_z": funding_z,
-            "bucket": bucket,
-            "atr_at_entry": atr_at_entry,   
-            "atr_stop_multiplier": atr_stop_multiplier
-        }
-        if extra:
-            self.current_trade.update(extra)
-    
-    def log_exit(self, exit_time, exit_price, pnl, r, holding_hours, extra=None):
-        """Логирует выход из сделки"""
-        if self.current_trade is None:
+    def log_trade(self, trade_context):
+        """Логирует завершенную сделку"""
+        if trade_context is None:
             return
-        
-        trade = self.current_trade
-        trade["exit_time"] = exit_time
-        trade["exit_price"] = exit_price
-        trade["pnl"] = pnl
-        trade["R"] = r
-        trade["holding_hours"] = holding_hours
-        
-        if extra:
-            trade.update(extra)
-        
-        self.trade_logs.append(trade)
-        self.current_trade = None
+        self.trade_logs.append(trade_context.to_dict())
     
     def export_to_csv(self, filename="trade_log.csv", debug_callback=None):
         """Экспортирует все логированные сделки в CSV файл"""
