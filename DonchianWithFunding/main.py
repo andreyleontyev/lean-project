@@ -2,6 +2,7 @@ from AlgorithmImports import *
 from datetime import datetime
 from BinanceFundingRateData import BinanceFundingRateData
 from BinanceHourlyBTC import BinanceHourlyBTC
+from ScoringStrategy import ScoringStrategy
 from TradeLogger import TradeLogger
 from collections import deque
 from TradeContext import TradeContext
@@ -387,21 +388,21 @@ class DonchianBTCWithFunding(QCAlgorithm):
             avg_r = 0
             median_r = 0
 
-        def parse_stat(stat_value, default=0.0):
-            if stat_value is None:
-                return default
-            if isinstance(stat_value, (int, float)):
-                return float(stat_value)
-            if isinstance(stat_value, str):
-                return float(stat_value.rstrip("%"))
-            return default
 
         sharpe_ratio = self.statistics.total_performance.portfolio_statistics.sharpe_ratio
+        sortino_ratio = self.statistics.total_performance.portfolio_statistics.sortino_ratio
+        win_rate = self.statistics.total_performance.portfolio_statistics.win_rate
+        average_win_rate = self.statistics.total_performance.portfolio_statistics.average_win_rate
         drawdown_val = self.statistics.total_performance.portfolio_statistics.drawdown
+        expectancy = self.statistics.total_performance.portfolio_statistics.expectancy
+        compounding_annual_return = self.statistics.total_performance.portfolio_statistics.compounding_annual_return
+        calmar = compounding_annual_return / drawdown_val if drawdown_val > 0 else 0
+        average_loss_rate = self.statistics.total_performance.portfolio_statistics.average_loss_rate
         start_equity = self.statistics.total_performance.portfolio_statistics.start_equity
         end_equity = self.statistics.total_performance.portfolio_statistics.end_equity
-
         trades_val = self.statistics.total_performance.trade_statistics.total_number_of_trades
+        average_trade_duration = self.statistics.total_performance.trade_statistics.average_trade_duration
+        profit_factor = self.statistics.total_performance.trade_statistics.profit_factor
 
         row = {
             "run_id": self.StartDate.strftime("%Y%m%d") + "_" + self.EndDate.strftime("%Y%m%d"),
@@ -413,12 +414,25 @@ class DonchianBTCWithFunding(QCAlgorithm):
 
             # --- metrics from Lean ---
             "sharpe": sharpe_ratio,
+            "sortino": sortino_ratio,
+            "calmar": calmar,
+            "expectancy": expectancy,
+            "cagr": compounding_annual_return,
+            "win_rate": win_rate,
+            "average_win_rate": average_win_rate,
+            "average_loss_rate": average_loss_rate,
             "max_drawdown_pct": drawdown_val,
-            "total_return_pct": end_equity,
-            "trades": trades_val,
+            "end_equity": end_equity,
+            "start_equity": start_equity,
+            "total_trades": trades_val,
+            "average_trade_duration": average_trade_duration,
+            "profit_factor": profit_factor,
             "avg_R": avg_r,
             "median_R": median_r
         }
+
+        score = ScoringStrategy.score_strategy(row)
+        row["score"] = score
 
         path = "/Lean/Data/exports/run_metrics.csv"
         file_exists = os.path.isfile(path)
