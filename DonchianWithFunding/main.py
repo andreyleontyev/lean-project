@@ -424,12 +424,12 @@ class DonchianBTCWithFunding(QCAlgorithm):
             "max_drawdown_pct": drawdown_val,
             "end_equity": end_equity,
             "start_equity": start_equity,
-            "total_trades": trades_val,
+            "total_trades": trades_val, 
             "average_trade_duration": average_trade_duration,
             "profit_factor": profit_factor,
             "avg_R": avg_r,
             "median_R": median_r
-            strategy_version": self.strategy_version
+            "strategy_version": self.strategy_version
         }
 
         score = ScoringStrategy.score_strategy(row)
