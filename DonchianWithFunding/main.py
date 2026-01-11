@@ -9,13 +9,15 @@ from TradeContext import TradeContext
 import statistics
 import csv
 import os
+import hashlib
+import json
 from PercentageFeeModel import PercentageFeeModel
 
 class DonchianBTCWithFunding(QCAlgorithm):
 
     STRATEGY_NAME = "BTC_Trend_Funding"
     STRATEGY_VERSION = "0.0.1"
-    
+
     BTC_TICK_SIZE = 0.01
     BTC_PRICE_ROUND = 2
 
@@ -51,6 +53,13 @@ class DonchianBTCWithFunding(QCAlgorithm):
         self.soft_exit_r   = float(self.GetParameter("soft_exit_r") or 3.0)
 
         # ===== END OPTIMIZATION PARAMETERS =====
+
+        version_hash = hashlib.md5(
+            json.dumps(dict(self.GetParameters()), sort_keys=True).encode()).hexdigest()[:8]
+
+        self.strategy_version = f"{self.STRATEGY_VERSION}-{version_hash}"
+        self.SetRuntimeStatistic("strategy_version", self.strategy_version)
+
 
         self.trade_context = None
 
