@@ -9,22 +9,13 @@ from TradeContext import TradeContext
 import statistics
 import csv
 import os
-
-
-
-# --- КЛАСС КОМИССИИ ---
-class PercentageFeeModel(FeeModel):
-    def __init__(self, percent):
-        self.percent = percent
-
-    def GetOrderFee(self, parameters):
-        # Считаем объем сделки: Цена * Количество
-        val = parameters.Security.Price * abs(parameters.Order.Quantity) * self.percent
-        # Возвращаем размер комиссии в валюте котировки (обычно USD)
-        return OrderFee(CashAmount(val, parameters.Security.QuoteCurrency.Symbol))
+from PercentageFeeModel import PercentageFeeModel
 
 class DonchianBTCWithFunding(QCAlgorithm):
 
+    STRATEGY_NAME = "BTC_Trend_Funding"
+    STRATEGY_VERSION = "0.0.1"
+    
     BTC_TICK_SIZE = 0.01
     BTC_PRICE_ROUND = 2
 
