@@ -57,8 +57,8 @@ class DonchianBTCWithFunding(QCAlgorithm):
         version_hash = hashlib.md5(
             json.dumps(dict(self.GetParameters()), sort_keys=True).encode()).hexdigest()[:8]
 
-        self.strategy_version = f"{self.STRATEGY_VERSION}-{version_hash}"
-        self.SetRuntimeStatistic("strategy_version", self.strategy_version)
+        self.strategy_version_run = f"{self.STRATEGY_VERSION}-{version_hash}"
+        self.SetRuntimeStatistic("strategy_version_run", self.strategy_version_run)
 
 
         self.trade_context = None
@@ -405,7 +405,7 @@ class DonchianBTCWithFunding(QCAlgorithm):
         profit_factor = self.statistics.total_performance.trade_statistics.profit_factor
 
         row = {
-            "run_id": self.StartDate.strftime("%Y%m%d") + "_" + self.EndDate.strftime("%Y%m%d") + self.strategy_version,
+            "run_id": self.StartDate.strftime("%Y%m%d") + "_" + self.EndDate.strftime("%Y%m%d") + "_" + self.strategy_version_run,
 
             # --- parameters ---
             "atr_stop_neutral": self.atr_stop_neutral,
@@ -428,8 +428,8 @@ class DonchianBTCWithFunding(QCAlgorithm):
             "average_trade_duration": average_trade_duration,
             "profit_factor": profit_factor,
             "avg_R": avg_r,
-            "median_R": median_r
-            "strategy_version": self.strategy_version
+            "median_R": median_r,
+            "strategy_version_run": self.strategy_version_run
         }
 
         score = ScoringStrategy.score_strategy(row)
