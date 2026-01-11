@@ -405,7 +405,7 @@ class DonchianBTCWithFunding(QCAlgorithm):
         profit_factor = self.statistics.total_performance.trade_statistics.profit_factor
 
         row = {
-            "run_id": self.StartDate.strftime("%Y%m%d") + "_" + self.EndDate.strftime("%Y%m%d"),
+            "run_id": self.StartDate.strftime("%Y%m%d") + "_" + self.EndDate.strftime("%Y%m%d") + self.strategy_version,
 
             # --- parameters ---
             "atr_stop_neutral": self.atr_stop_neutral,
@@ -429,6 +429,7 @@ class DonchianBTCWithFunding(QCAlgorithm):
             "profit_factor": profit_factor,
             "avg_R": avg_r,
             "median_R": median_r
+            strategy_version": self.strategy_version
         }
 
         score = ScoringStrategy.score_strategy(row)
