@@ -76,7 +76,9 @@ class DonchianBTCWithFunding(QCAlgorithm):
         # ===== TRADE LOGGER =====
         export_path = self.GetParameter("export_path")
         if not export_path:
-            export_path = "/Lean/Data/exports"
+            # Используем правильный путь относительно DataFolder
+            export_path = os.path.join(Globals.DataFolder, "exports")
+            os.makedirs(export_path, exist_ok=True)
         self.trade_logger = TradeLogger(export_path=export_path)
 
         # 1. Добавляем ваши кастомные данные
@@ -272,6 +274,9 @@ class DonchianBTCWithFunding(QCAlgorithm):
     def _manage_position(self, close_price: float):
         """Управляет открытой позицией: выходы и обновление стоп-лосса"""
         tc = self.trade_context
+        if tc is None:
+            return
+
         tc.max_price = max(tc.max_price, close_price)
         
         risk_per_unit = tc.atr_at_entry * tc.stop_multiplier
@@ -371,7 +376,7 @@ class DonchianBTCWithFunding(QCAlgorithm):
             self.trade_context.close(self.Time, orderEvent.FillPrice, exit_reason)
             self.trade_logger.log_trade(self.trade_context)
             self.run_r.append(self.trade_context.r_multiple)
-            self.Debug(f"TRADE CLOSED | R={round(self.trade_context.r_multiple,2)}")
+            # self.Debug(f"TRADE CLOSED | R={round(self.trade_context.r_multiple,2)}")
             
             self.trade_context = None
             self.position_manager.clear_stop_ticket()
@@ -435,7 +440,10 @@ class DonchianBTCWithFunding(QCAlgorithm):
         score = ScoringStrategy.score_strategy(row)
         row["score"] = score
 
-        path = "/Lean/Data/exports/run_metrics.csv"
+        # Используем правильный путь относительно DataFolder
+        exports_dir = os.path.join(Globals.DataFolder, "exports")
+        os.makedirs(exports_dir, exist_ok=True)
+        path = os.path.join(exports_dir, "run_metrics.csv")
         file_exists = os.path.isfile(path)
 
         with open(path, mode="a", newline="") as f:

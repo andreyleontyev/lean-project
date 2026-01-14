@@ -23,6 +23,7 @@ class TradeContext:
         self.risk_multiplier = risk_multiplier
 
         # === RUNTIME STATE ===
+        self.max_price = self.entry_price
         self.initial_stop = initial_stop
         self.current_stop = self.initial_stop
         self.max_price = entry_price  # для трейлинга

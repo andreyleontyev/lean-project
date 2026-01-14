@@ -14,7 +14,9 @@ def load_results() -> pd.DataFrame:
     Returns:
         pd.DataFrame: DataFrame с метриками. Пустой DataFrame если файл не существует.
     """
-    path = "/Lean/Data/exports/run_metrics.csv"
+    # Путь относительно корня проекта
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    path = os.path.join(project_root, "Data", "exports", "run_metrics.csv")
     
     if not os.path.exists(path):
         return pd.DataFrame()
