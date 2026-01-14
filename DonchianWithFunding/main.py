@@ -36,7 +36,7 @@ class DonchianBTCWithFunding(QCAlgorithm):
         self.atr_period = int(self.GetParameter("atr_period") or 14)
 
         self.atr_stop_negative = float(self.GetParameter("atr_stop_negative") or 3.0)
-        self.atr_stop_neutral  = float(self.GetParameter("atr_stop_neutral")  or 2.5)
+        self.atr_stop_neutral  = float(self.GetParameter("atr_stop_neutral")  or 2.0)
         self.atr_stop_positive = float(self.GetParameter("atr_stop_positive") or 2.0)
 
         # --- Risk multipliers ---
@@ -49,7 +49,7 @@ class DonchianBTCWithFunding(QCAlgorithm):
         self.breakeven_atr_frac = float(self.GetParameter("breakeven_atr_frac") or 0.75)
 
         # --- Trailing / exits ---
-        self.trail_start_r = float(self.GetParameter("trail_start_r") or 2.0)
+        self.trail_start_r = float(self.GetParameter("trail_start_r") or 1.8)
         self.soft_exit_r   = float(self.GetParameter("soft_exit_r") or 3.0)
 
         # ===== END OPTIMIZATION PARAMETERS =====
@@ -411,13 +411,16 @@ class DonchianBTCWithFunding(QCAlgorithm):
 
         row = {
             "run_id": self.StartDate.strftime("%Y%m%d") + "_" + self.EndDate.strftime("%Y%m%d") + "_" + self.strategy_version_run,
+        }
 
-            # --- parameters ---
-            "atr_stop_neutral": self.atr_stop_neutral,
-            "trail_start_r": self.trail_start_r,
-            "breakeven_r": self.breakeven_r,
+        # --- parameters from GetParameter ---
+        params = self.GetParameters()
+        if params:
+            for param_name, param_value in params.items():
+                row[param_name] = param_value
 
-            # --- metrics from Lean ---
+        # --- metrics from Lean ---
+        row.update({
             "sharpe": sharpe_ratio,
             "sortino": sortino_ratio,
             "calmar": calmar,
@@ -435,7 +438,7 @@ class DonchianBTCWithFunding(QCAlgorithm):
             "avg_R": avg_r,
             "median_R": median_r,
             "strategy_version_run": self.strategy_version_run
-        }
+        })
 
         score = ScoringStrategy.score_strategy(row)
         row["score"] = score
